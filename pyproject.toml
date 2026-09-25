@@ -16,9 +16,6 @@ dependencies = [
     "prompt-toolkit (>=3.0.52,<4.0.0)"
 ]
 
-[project.optional-dependencies]
-jev = ["typesafe-sdk>=0.7.1,<0.8"]
-
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

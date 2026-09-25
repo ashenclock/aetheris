@@ -14,12 +14,13 @@ venv.bak/
 credentials.json
 .netrc
 
-# Agent Memory / SQLite
+# Agent state and generated knowledge
 *.db
 *.sqlite
 *.sqlite3
 aetheris_memory.db
 memory.db
+.aetheris/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -50,8 +51,6 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -85,7 +84,6 @@ cover/
 .DS_Store
 
 # Poetry
-# Note: poetry.lock should be committed, but .poetry cache should not.
 .poetry/
 
 # MyPy

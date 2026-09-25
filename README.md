@@ -70,7 +70,7 @@ Resume later by reopening the same session in chat mode:
 The default policy is deterministic and pauses after repeated failures. To use Jev as a separate decision layer:
 
 ```bash
-poetry install -E jev
+pip install "typesafe-sdk>=0.7.1,<0.8"
 export TYPESAFE_API_KEY=...
 export AETHERIS_DECISION_POLICY=jev
 ```
@@ -79,7 +79,7 @@ Jev is intentionally not the worker model. It only answers the narrow question: 
 
 ## Durable knowledge
 
-The `remember` skill writes Markdown pages under `.aetheris/wiki/`. The `recall` skill searches those pages in later sessions. This keeps stable project knowledge readable by both humans and agents and avoids hiding all memory inside an embedding database.
+The `remember` skill writes Markdown pages under `.aetheris/wiki/`. The `recall` skill searches those pages in later sessions. This keeps stable project knowledge readable by both humans and agents and avoids hiding all memory inside an embedding database. Generated wiki pages are ignored by Git by default to reduce the chance of committing private context.
 
 ## Project layout
 
