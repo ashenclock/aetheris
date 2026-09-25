@@ -70,12 +70,12 @@ Resume later by reopening the same session in chat mode:
 The default policy is deterministic and pauses after repeated failures. To use Jev as a separate decision layer:
 
 ```bash
-pip install "typesafe-sdk>=0.7.1,<0.8"
+poetry run pip install "typesafe-sdk>=0.7.1,<0.8"
 export TYPESAFE_API_KEY=...
 export AETHERIS_DECISION_POLICY=jev
 ```
 
-Jev is intentionally not the worker model. It only answers the narrow question: should this run continue or pause for human review?
+Jev is intentionally not the worker model. It only answers the narrow question: should this run continue or pause for human review? To keep the control plane cheap, the policy is consulted after failures and periodically rather than after every successful tool call.
 
 ## Durable knowledge
 

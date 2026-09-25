@@ -92,10 +92,13 @@ class Agent:
                 await self.memory.checkpoint(state, "Execution budget reached.")
                 return self._pause_message(state, "Execution budget reached.")
 
+            messages = await self.memory.get_history()
+            messages.append({"role": "system", "content": self._runtime_context(state)})
+
             try:
                 response = await acompletion(
                     model=self.model_name,
-                    messages=await self.memory.get_history(),
+                    messages=messages,
                     tools=self._tool_schemas(),
                 )
             except Exception as exc:
@@ -126,11 +129,12 @@ class Agent:
                 await self._execute_tool_call(tool_call, state)
                 await self.memory.checkpoint(state, f"Completed step {state.step_count}.")
 
-                decision = await self.policy.decide(state)
-                if decision.action == "pause":
-                    state.status = TaskStatus.PAUSED
-                    await self.memory.checkpoint(state, decision.reason)
-                    return self._pause_message(state, decision.reason)
+                if state.consecutive_failures > 0 or state.step_count % 5 == 0:
+                    decision = await self.policy.decide(state)
+                    if decision.action == "pause":
+                        state.status = TaskStatus.PAUSED
+                        await self.memory.checkpoint(state, decision.reason)
+                        return self._pause_message(state, decision.reason)
 
     async def _ensure_state(self, goal: str) -> TaskState:
         state = await self.memory.load_state()
@@ -185,6 +189,19 @@ class Agent:
             result,
             name=name,
             tool_call_id=call_id,
+        )
+
+    @staticmethod
+    def _runtime_context(state: TaskState) -> str:
+        return (
+            "Runtime state (authoritative, compact, and not part of durable chat history):\n"
+            f"- goal: {state.goal}\n"
+            f"- step: {state.step_count}/{state.max_steps}\n"
+            f"- cost budget: ${state.cost_budget_usd:.2f}\n"
+            f"- consecutive failures: {state.consecutive_failures}\n"
+            f"- last action: {state.last_action or 'none'}\n"
+            f"- last error: {state.last_error or 'none'}\n"
+            "Continue toward the original goal. Prefer small, reversible actions."
         )
 
     @staticmethod
