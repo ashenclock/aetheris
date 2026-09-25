@@ -1,9 +1,9 @@
 [project]
 name = "aetheris"
-version = "0.1.0"
-description = "A lightweight, modular Agentic AI CLI optimized for local inference on Apple Silicon"
+version = "0.2.0"
+description = "A lightweight, local-first, resumable coding agent"
 authors = [
-    {name = "Antonio",email = "antonio.spedito01@gmail.com"}
+    {name = "Antonio", email = "antonio.spedito01@gmail.com"}
 ]
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -16,6 +16,8 @@ dependencies = [
     "prompt-toolkit (>=3.0.52,<4.0.0)"
 ]
 
+[project.optional-dependencies]
+jev = ["typesafe-sdk>=0.7.1,<0.8"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

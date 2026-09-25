@@ -1,115 +1,169 @@
-import asyncio
-import aiosqlite
-import json
-from litellm import acompletion
-import logging
+from __future__ import annotations
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("AetherisMemory")
+import json
+from typing import Any
+
+import aiosqlite
+
+from .state import TaskState
+
 
 class SessionMemory:
-    """
-    Handles SQLite-based long-term memory for an Agentic session.
-    Includes an automatic compaction hook for M1 optimization.
-    """
+    """Durable session history, task state, and checkpoints backed by SQLite."""
+
     def __init__(self, db_path: str = "memory.db", session_id: str = "default"):
         self.db_path = db_path
         self.session_id = session_id
-        self.token_threshold = 6000  # Threshold to trigger compaction
 
-    async def init_db(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT,
-                    role TEXT,
-                    content TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            await db.commit()
-
-    async def add_message(self, role: str, content: str):
+    async def init_db(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                (self.session_id, role, content)
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    name TEXT,
+                    tool_call_id TEXT,
+                    tool_calls_json TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_state (
+                    session_id TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await self._migrate_messages(db)
+            await db.commit()
+
+    async def _migrate_messages(self, db: aiosqlite.Connection) -> None:
+        async with db.execute("PRAGMA table_info(messages)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        for name, sql_type in {
+            "name": "TEXT",
+            "tool_call_id": "TEXT",
+            "tool_calls_json": "TEXT",
+        }.items():
+            if name not in columns:
+                await db.execute(f"ALTER TABLE messages ADD COLUMN {name} {sql_type}")
+
+    async def add_message(
+        self,
+        role: str,
+        content: str | None = None,
+        *,
+        name: str | None = None,
+        tool_call_id: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, name, tool_call_id, tool_calls_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.session_id,
+                    role,
+                    content,
+                    name,
+                    tool_call_id,
+                    json.dumps(tool_calls) if tool_calls else None,
+                ),
             )
             await db.commit()
-            
-        await self._check_compaction()
 
-    async def get_history(self) -> list:
+    async def get_history(self) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
-                (self.session_id,)
+                """
+                SELECT role, content, name, tool_call_id, tool_calls_json
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (self.session_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-                return [{"role": row[0], "content": row[1]} for row in rows]
 
-    async def _check_compaction(self):
-        """
-        If memory gets too large, compress it into a summary to save M1 RAM and context window.
-        """
-        history = await self.get_history()
-        # Very rough heuristic: 1 word ~ 1.3 tokens
-        approx_tokens = sum(len(str(m["content"]).split()) * 1.3 for m in history)
-        
-        if approx_tokens > self.token_threshold:
-            logger.info(f"Memory threshold exceeded ({approx_tokens} > {self.token_threshold}). Triggering Compaction...")
-            await self._compact_memory(history)
+        history: list[dict[str, Any]] = []
+        for role, content, name, tool_call_id, tool_calls_json in rows:
+            message: dict[str, Any] = {"role": role, "content": content}
+            if name:
+                message["name"] = name
+            if tool_call_id:
+                message["tool_call_id"] = tool_call_id
+            if tool_calls_json:
+                message["tool_calls"] = json.loads(tool_calls_json)
+            history.append(message)
+        return history
 
-    async def _compact_memory(self, history: list):
-        """
-        Uses an LLM (ideally a cheap/local one) to summarize the history.
-        """
-        try:
-            # We compress everything except the last 3 messages to keep immediate context
-            to_compress = history[:-3]
-            logger.info("Sending history to Ollama for summarization...")
-            response = await acompletion(
-                model="ollama/llama3",
-                messages=[{"role": "system", "content": prompt}],
-                max_tokens=500
+    async def save_state(self, state: TaskState) -> None:
+        payload = state.model_dump_json()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO task_state (session_id, state_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (self.session_id, payload),
             )
-            
-            summary = response.choices[0].message.content
-            
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("DELETE FROM messages WHERE session_id = ? AND role != 'system'", (self.session_id,))
-                
-                summary_text = f"[COMPACTED HISTORY SUMMARY]\n{summary}"
-                await db.execute(
-                    "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                    (self.session_id, "system", summary_text)
-                )
-                
-                for msg in recent:
-                    await db.execute(
-                        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                        (self.session_id, msg["role"], msg["content"])
-                    )
-                await db.commit()
-            
-            logger.info("Compaction successful.")
-            
-        except Exception as e:
-            logger.warning(f"Compaction failed (maybe Ollama is not running?). Error: {e}")
-            logger.info("Falling back to simple truncation...")
-            # Fallback: keep only the last 10 messages
-            recent = history[-10:]
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("DELETE FROM messages WHERE session_id = ?", (self.session_id,))
-                summary_text = f"[AUTO-TRUNCATED] Conversation history reduced to last {len(recent)} messages due to compaction failure."
-                await db.execute(
-                    "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                    (self.session_id, "system", summary_text)
-                )
-                for msg in recent:
-                    await db.execute(
-                        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                        (self.session_id, msg["role"], msg["content"])
-                    )
-                await db.commit()
+            await db.commit()
+
+    async def load_state(self) -> TaskState | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT state_json FROM task_state WHERE session_id = ?",
+                (self.session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return TaskState.model_validate_json(row[0]) if row else None
+
+    async def checkpoint(self, state: TaskState, reason: str) -> None:
+        state.checkpoint_count += 1
+        await self.save_state(state)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO checkpoints (session_id, state_json, reason) VALUES (?, ?, ?)",
+                (self.session_id, state.model_dump_json(), reason),
+            )
+            await db.commit()
+
+    async def latest_checkpoint(self) -> tuple[TaskState, str] | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT state_json, reason
+                FROM checkpoints
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (self.session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row:
+            return None
+        return TaskState.model_validate_json(row[0]), row[1]

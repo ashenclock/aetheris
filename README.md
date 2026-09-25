@@ -1,88 +1,110 @@
-<div align="center">
+# Aetheris
 
-<pre>
-    ___       __  __               _     
-   /   | ___ / /_/ /_  ___  ____  (_)____
-  / /| |/ _ \ __/ __ \/ _ \/ __ \/ / ___/
- / ___ /  __/ /_/ / / /  __/ / / / (__  )
-/_/  |_\___/\__/_/ /_/\___/_/ /_/_/____/ 
-</pre>
+Aetheris is a small, local-first coding agent focused on three things: **tool use, resumability, and inspectable long-term memory**.
 
-**A lightweight, local-first Auto-Agent CLI.**
+It deliberately avoids a large agent framework. The core loop is plain Python and LiteLLM, while durable state lives in SQLite and durable project knowledge lives in Markdown.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org)
-[![LiteLLM](https://img.shields.io/badge/Powered_by-LiteLLM-orange.svg)](https://github.com/BerriAI/litellm)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## Why this version is different
 
-</div>
+A short ReAct loop is easy to demo. Long-running agents fail for different reasons: context drift, repeated tool errors, runaway cost, and losing progress after interruption. Aetheris addresses those failure modes with a minimal runtime:
 
-## 🌌 Overview
+- **Durable task state** — goal, status, step count, failure count, and budgets are persisted.
+- **Checkpoint after every tool step** — an interrupted session can be resumed without reconstructing the run from scratch.
+- **Real tool messages** — tool calls and results use the standard assistant/tool protocol instead of being disguised as user messages.
+- **Budget gates** — a run pauses when its step or cost budget is exhausted.
+- **Human approval** — sensitive skills can require confirmation.
+- **Markdown knowledge wiki** — `remember` and `recall` keep durable project facts separate from transient chat history.
+- **Optional Jev watchdog** — Jev can make the narrow `continue` vs `pause-for-review` decision while the main LLM remains responsible for reasoning and generation.
 
-Aetheris is a modular, high-performance CLI Agent engineered for local development. Built on a pure ReAct loop architecture with `LiteLLM`, it functions as a fully autonomous Pair Programmer directly inside your terminal. It natively supports code writing, safe shell execution, and intelligent codebase navigation.
+## Architecture
 
-## ✨ Features
-
-- **🧠 Provider Agnostic:** Thanks to LiteLLM, you can use local models (Ollama/Llama3, DeepSeek) or remote ones (OpenAI, Anthropic) seamlessly.
-- **⚡ Auto-Agent Skills:** Aetheris can read files, write code, edit specific lines, list directories, and execute shell commands safely.
-- **💾 Persistent SQLite Memory:** Every conversation is saved locally. Sessions are automatically compacted (summarized by the LLM) to save context tokens.
-- **🔄 Multi-Session Support:** Switch between projects instantly using `/new <session_id>` or `/resume <session_id>`.
-- **🎨 Rich Terminal UI:** Markdown rendering with syntax highlighting, autocomplete suggestions, and visual themes.
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.10+
-- [Poetry](https://python-poetry.org/) (for dependency management)
-- [Ollama](https://ollama.com/) (if using local models, default is `ollama/llama3`)
-
-### Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/aetheris.git
-cd aetheris
+```text
+user goal
+   |
+   v
+Agent loop -----> LiteLLM model
+   |                  |
+   |                  v
+   |              tool call
+   |                  |
+   v                  v
+TaskState <----- skill executor
+   |                  |
+   +---- checkpoint --+
+   |
+   +---- SQLite session history
+   |
+   +---- Markdown knowledge wiki
+   |
+   +---- policy gate (heuristic or optional Jev)
 ```
 
-2. Install dependencies via Poetry:
+The design borrows the useful ideas from larger agent runtimes without copying their complexity: explicit state, action/observation history, resumability, safety gates, and knowledge that survives a single context window.
+
+## Quick start
+
 ```bash
 poetry install
-```
-
-3. Launch Aetheris:
-```bash
 poetry run python -m nexus.cli chat --model ollama/llama3
 ```
 
-## 🛠️ Usage
+Run one autonomous task with explicit limits:
 
-### Interactive CLI Commands
-While inside the chat, you can use the following commands:
-- `/new <name>`: Create a fresh, isolated session context.
-- `/resume <name>`: Load a previous session context from the SQLite database.
-- `/agent <name> <prompt>`: Create a temporary agent overriding the default personality.
-- `/theme <name>`: Switch UI themes (`hacker`, `dracula`, `default`).
-- `/clear`: Clear the terminal screen (or press `Ctrl+L`).
-- `/help`: Show all available commands.
-
-### Prompt Tagging
-You can tag local files directly in your prompt using `@`:
-```text
-[default - aetheris] > Please explain the logic inside @nexus/core/agent.py
+```bash
+poetry run python -m nexus.cli run \
+  "Inspect this repository and fix the failing tests" \
+  --model ollama/llama3 \
+  --session repair-tests \
+  --max-steps 30 \
+  --cost-budget 0.50
 ```
 
-## 🧩 Architecture
+Resume later by reopening the same session in chat mode:
 
-Aetheris is built around a lightweight `Agent` class that orchestrates:
-1. **Memory (`memory.py`)**: Asynchronous SQLite tracking of all messages.
-2. **Skills (`skills/`)**: Dynamically loaded Python modules that grant the agent tool-calling abilities (e.g., `RunCommandSkill`, `WriteFileSkill`).
-3. **Tracker (`tracker.py`)**: Real-time token and cost estimation.
+```text
+/resume repair-tests
+```
 
-## 🤝 Contributing
+## Optional Jev policy gate
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+The default policy is deterministic and pauses after repeated failures. To use Jev as a separate decision layer:
 
-Please refer to the [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+```bash
+poetry install -E jev
+export TYPESAFE_API_KEY=...
+export AETHERIS_DECISION_POLICY=jev
+```
 
-## 📄 License
+Jev is intentionally not the worker model. It only answers the narrow question: should this run continue or pause for human review?
 
-Distributed under the MIT License. See `LICENSE` for more information.
+## Durable knowledge
+
+The `remember` skill writes Markdown pages under `.aetheris/wiki/`. The `recall` skill searches those pages in later sessions. This keeps stable project knowledge readable by both humans and agents and avoids hiding all memory inside an embedding database.
+
+## Project layout
+
+```text
+nexus/
+  core/
+    agent.py       # reasoning/action loop
+    memory.py      # SQLite messages, state, checkpoints
+    state.py       # typed task state
+    policy.py      # heuristic and optional Jev gate
+    knowledge.py   # Markdown long-term knowledge
+    tracker.py     # token and cost accounting
+  skills/          # dynamically discovered tools
+  cli.py           # minimal interactive and one-shot CLI
+```
+
+## Design principles
+
+- Keep deterministic control flow in code.
+- Give the model tools, not hidden side effects.
+- Persist enough state to recover from interruption.
+- Separate transient conversation history from durable knowledge.
+- Put hard limits around autonomous execution.
+- Prefer a clean pause over uncontrolled retries.
+
+## License
+
+MIT. See `LICENSE`.

@@ -1,138 +1,212 @@
-import os
-import asyncio
+from __future__ import annotations
+
+import importlib
+import inspect
 import json
 import logging
-from litellm import acompletion
-from rich.console import Console
-import inspect
-import importlib
+import os
 import pkgutil
+from typing import Any
+
+from litellm import acompletion
+
+from nexus.skills.base_skill import BaseSkill
 
 from .memory import SessionMemory
+from .policy import DecisionPolicy, build_policy
+from .state import TaskState, TaskStatus
 from .tracker import CostTracker
-from nexus.skills.base_skill import BaseSkill
-from nexus.skills import list_dir, read_file
 
 logger = logging.getLogger("AetherisAgent")
-console = Console()
+
 
 class Agent:
-    def __init__(self, model_name: str, db_path: str = "memory.db", session_id: str = "default"):
+    def __init__(
+        self,
+        model_name: str,
+        db_path: str = "memory.db",
+        session_id: str = "default",
+        max_steps: int = 40,
+        cost_budget_usd: float = 1.0,
+        policy: DecisionPolicy | None = None,
+    ):
         self.model_name = model_name
         self.session_id = session_id
-        # In memory.py the SessionMemory class expects session_id as the first param or kwargs, let's assume it accepts session_id.
-        # Wait, let me check memory.py definition first... Ah I can't check easily without a tool, but I wrote it! 
-        # I remember `SessionMemory` takes `session_id="default"` and `db_path="memory.db"`.
-        self.memory = SessionMemory(session_id=self.session_id, db_path=db_path)
+        self.max_steps = max_steps
+        self.cost_budget_usd = cost_budget_usd
+        self.memory = SessionMemory(db_path=db_path, session_id=session_id)
         self.tracker = CostTracker()
-        self.skills = {}
-        self._load_skills()
-        
-        # Load Mega Prompt
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "mega_prompt.md")
-        try:
-            with open(prompt_path, "r", encoding="utf-8") as f:
-                self.system_prompt = f.read()
-        except FileNotFoundError:
-            self.system_prompt = "Sei Aetheris, un Senior Full-Stack Engineer."
+        self.policy = policy or build_policy()
+        self.skills = self._load_skills()
+        self.system_prompt = self._load_system_prompt()
 
-    def _load_skills(self):
-        """
-        Carica dinamicamente tutte le skill dalla cartella nexus/skills/
-        """
-        import importlib
-        import pkgutil
-        import inspect
+    def _load_system_prompt(self) -> str:
+        path = os.path.join(os.path.dirname(__file__), "prompts", "mega_prompt.md")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return "You are Aetheris, a careful software engineering agent."
+
+    def _load_skills(self) -> dict[str, BaseSkill]:
         import nexus.skills
-        from nexus.skills.base_skill import BaseSkill
-        
-        pkg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
-        
-        for importer, modname, ispkg in pkgutil.iter_modules([pkg_path]):
-            if modname == "base_skill":
+
+        skills: dict[str, BaseSkill] = {}
+        package_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
+        for _, module_name, _ in pkgutil.iter_modules([package_path]):
+            if module_name == "base_skill":
                 continue
             try:
-                module = importlib.import_module(f"nexus.skills.{modname}")
-                for name, obj in inspect.getmembers(module):
-                    if (inspect.isclass(obj) 
-                        and issubclass(obj, BaseSkill) 
-                        and obj is not BaseSkill):
-                        skill_instance = obj()
-                        self.skills[skill_instance.name] = skill_instance
-                        logger.debug(f"Loaded skill: {skill_instance.name}")
-            except Exception as e:
-                logger.warning(f"Could not load skill module '{modname}': {e}")
+                module = importlib.import_module(f"nexus.skills.{module_name}")
+                for _, obj in inspect.getmembers(module, inspect.isclass):
+                    if issubclass(obj, BaseSkill) and obj is not BaseSkill:
+                        skill = obj()
+                        skills[skill.name] = skill
+            except Exception as exc:
+                logger.warning("Could not load skill %s: %s", module_name, exc)
+        return skills
 
-    def _get_litellm_tools(self) -> list:
-        tools = []
-        for name, skill in self.skills.items():
-            tools.append({
-                "type": "function",
-                "function": skill.get_function_schema()
-            })
-        return tools if tools else None
+    def _tool_schemas(self) -> list[dict[str, Any]] | None:
+        if not self.skills:
+            return None
+        return [
+            {"type": "function", "function": skill.get_function_schema()}
+            for skill in self.skills.values()
+        ]
 
-    async def init(self):
+    async def init(self) -> None:
         await self.memory.init_db()
-        history = await self.memory.get_history()
-        if not history:
+        if not await self.memory.get_history():
             await self.memory.add_message("system", self.system_prompt)
 
-    async def chat(self, user_input: str):
+    async def close(self) -> None:
+        await self.policy.close()
+
+    async def chat(self, user_input: str) -> str:
         await self.memory.add_message("user", user_input)
-        
-        from rich.prompt import Confirm
-        
+        state = await self._ensure_state(user_input)
+
         while True:
-            messages = await self.memory.get_history()
-            tools = self._get_litellm_tools()
-            
+            if state.should_pause(self.tracker.total_cost):
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(state, "Execution budget reached.")
+                return self._pause_message(state, "Execution budget reached.")
+
             try:
                 response = await acompletion(
                     model=self.model_name,
-                    messages=messages,
-                    tools=tools
+                    messages=await self.memory.get_history(),
+                    tools=self._tool_schemas(),
                 )
-                
-                self.tracker.add_usage(response)
-                response_message = response.choices[0].message
-                
-                if response_message.tool_calls:
-                    for tool_call in response_message.tool_calls:
-                        func_name = tool_call.function.name
-                        func_args = json.loads(tool_call.function.arguments)
-                        
-                        # Salva in memoria che l'assistente ha chiamato il tool
-                        await self.memory.add_message("assistant", f"I am executing tool '{func_name}' with arguments: {func_args}")
-                        
-                        console.print(f"[dim yellow]⚡ Richiesta esecuzione tool: {func_name}({func_args})[/dim yellow]")
-                        
-                        if func_name in self.skills:
-                            skill = self.skills[func_name]
-                            
-                            if skill.requires_confirmation:
-                                console.print(f"[bold red]⚠️ L'agente vuole eseguire un'azione sensibile: {func_name}[/bold red]")
-                                if not Confirm.ask("Autorizzi l'esecuzione?"):
-                                    result = f"L'utente ha NEGATO l'esecuzione di '{func_name}'."
-                                    await self.memory.add_message("user", f"Risultato di '{func_name}':\n{result}")
-                                    continue
-                                    
-                            try:
-                                result = await skill.execute(**func_args)
-                            except Exception as e:
-                                result = f"Error executing tool: {e}"
-                        else:
-                            result = f"Error: Tool '{func_name}' not found."
-                            
-                        # Usiamo "user" invece di "tool" per evitare che DeepSeek o OpenAI crashino richiedendo il tool_call_id
-                        await self.memory.add_message("user", f"Tool '{func_name}' execution result:\n{result}")
-                        
-                    continue
+            except Exception as exc:
+                state.status = TaskStatus.FAILED
+                state.last_error = str(exc)
+                await self.memory.checkpoint(state, "LLM request failed.")
+                logger.exception("LLM request failed")
+                return f"Agent request failed: {exc}"
+
+            self.tracker.add_usage(response)
+            message = response.choices[0].message
+            tool_calls = self._serialize_tool_calls(getattr(message, "tool_calls", None))
+
+            if not tool_calls:
+                reply = message.content or ""
+                await self.memory.add_message("assistant", reply)
+                state.status = TaskStatus.COMPLETED
+                await self.memory.checkpoint(state, "Task completed.")
+                return reply
+
+            await self.memory.add_message(
+                "assistant",
+                message.content,
+                tool_calls=tool_calls,
+            )
+
+            for tool_call in tool_calls:
+                await self._execute_tool_call(tool_call, state)
+                await self.memory.checkpoint(state, f"Completed step {state.step_count}.")
+
+                decision = await self.policy.decide(state)
+                if decision.action == "pause":
+                    state.status = TaskStatus.PAUSED
+                    await self.memory.checkpoint(state, decision.reason)
+                    return self._pause_message(state, decision.reason)
+
+    async def _ensure_state(self, goal: str) -> TaskState:
+        state = await self.memory.load_state()
+        if state and state.status in {TaskStatus.RUNNING, TaskStatus.PAUSED}:
+            state.status = TaskStatus.RUNNING
+            await self.memory.save_state(state)
+            return state
+
+        state = TaskState(
+            session_id=self.session_id,
+            goal=goal,
+            max_steps=self.max_steps,
+            cost_budget_usd=self.cost_budget_usd,
+        )
+        await self.memory.checkpoint(state, "Task started.")
+        return state
+
+    async def _execute_tool_call(self, tool_call: dict[str, Any], state: TaskState) -> None:
+        call_id = tool_call["id"]
+        function = tool_call["function"]
+        name = function["name"]
+
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except json.JSONDecodeError as exc:
+            result = f"Invalid tool arguments: {exc}"
+            state.record_step(name, success=False, error=result)
+            await self.memory.add_message(
+                "tool", result, name=name, tool_call_id=call_id
+            )
+            return
+
+        skill = self.skills.get(name)
+        if skill is None:
+            result = f"Unknown tool: {name}"
+            state.record_step(name, success=False, error=result)
+        else:
+            try:
+                if skill.requires_confirmation and not await skill.confirm(arguments):
+                    result = "Tool execution was not approved."
+                    state.record_step(name, success=False, error=result)
                 else:
-                    reply = response_message.content
-                    await self.memory.add_message("assistant", reply)
-                    return reply
-                    
-            except Exception as e:
-                logger.error(f"Error during LLM call: {e}")
-                return f"Error: {str(e)}"
+                    result = await skill.execute(**arguments)
+                    success = not result.lower().startswith(("error", "failed"))
+                    state.record_step(name, success=success, error=None if success else result)
+            except Exception as exc:
+                result = f"Tool execution failed: {exc}"
+                state.record_step(name, success=False, error=result)
+
+        await self.memory.add_message(
+            "tool",
+            result,
+            name=name,
+            tool_call_id=call_id,
+        )
+
+    @staticmethod
+    def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for call in tool_calls or []:
+            function = getattr(call, "function", None)
+            serialized.append(
+                {
+                    "id": getattr(call, "id", "tool-call"),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(function, "name", ""),
+                        "arguments": getattr(function, "arguments", "{}"),
+                    },
+                }
+            )
+        return serialized
+
+    @staticmethod
+    def _pause_message(state: TaskState, reason: str) -> str:
+        return (
+            f"Task paused after {state.step_count} steps. {reason} "
+            "Resume the same session when you are ready to continue."
+        )
