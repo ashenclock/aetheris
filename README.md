@@ -1,109 +1,104 @@
 # Aetheris
 
-Aetheris is a small, local-first coding agent focused on three things: **tool use, resumability, and inspectable long-term memory**.
+Aetheris is a small, local-first coding agent. It started as a ReAct loop; this branch redesigns the runtime around the parts that fail on longer tasks: durable state, interruption recovery, bounded context, explicit approval, and repeatable evaluation.
 
-It deliberately avoids a large agent framework. The core loop is plain Python and LiteLLM, while durable state lives in SQLite and durable project knowledge lives in Markdown.
+The control flow stays in Python. LiteLLM supplies model calls, SQLite stores task history, and a Markdown wiki holds project knowledge that should survive a session.
 
-## Why this version is different
-
-A short ReAct loop is easy to demo. Long-running agents fail for different reasons: context drift, repeated tool errors, runaway cost, and losing progress after interruption. Aetheris addresses those failure modes with a minimal runtime:
-
-- **Durable task state** — goal, status, step count, failure count, and budgets are persisted.
-- **Checkpoint after every tool step** — an interrupted session can be resumed without reconstructing the run from scratch.
-- **Real tool messages** — tool calls and results use the standard assistant/tool protocol instead of being disguised as user messages.
-- **Budget gates** — a run pauses when its step or cost budget is exhausted.
-- **Human approval** — sensitive skills can require confirmation.
-- **Markdown knowledge wiki** — `remember` and `recall` keep durable project facts separate from transient chat history.
-- **Optional Jev watchdog** — Jev can make the narrow `continue` vs `pause-for-review` decision while the main LLM remains responsible for reasoning and generation.
-
-## Architecture
+## Runtime
 
 ```text
-user goal
-   |
-   v
-Agent loop -----> LiteLLM model
-   |                  |
-   |                  v
-   |              tool call
-   |                  |
-   v                  v
-TaskState <----- skill executor
-   |                  |
-   +---- checkpoint --+
-   |
-   +---- SQLite session history
-   |
-   +---- Markdown knowledge wiki
-   |
-   +---- policy gate (heuristic or optional Jev)
+goal + recent context + relevant wiki pages
+                   |
+                   v
+             LLM reasoning
+                   |
+                   v
+       assistant tool call (typed ID)
+                   |
+                   v
+          approved skill execution
+                   |
+                   v
+      tool result + durable checkpoint
+                   |
+             next model step
 ```
 
-The design borrows the useful ideas from larger agent runtimes without copying their complexity: explicit state, action/observation history, resumability, safety gates, and knowledge that survives a single context window.
+The model chooses semantic actions. Python enforces step limits, records outcomes, checks estimated cost when the provider exposes it, pauses after repeated failures, requests approval for sensitive tools, and persists checkpoints. The model is never asked to decide whether a numeric limit has been exceeded.
 
-## Quick start
+## Long-running tasks
+
+Each task has a durable state record: goal, status, step and cost budgets, consecutive failures, last action and error, token totals, tool failures, recovered interruptions, approval pauses, and checkpoint count.
+
+- SQLite updates task state and checkpoint rows in one transaction.
+- A tool call is stored as an assistant message. Its result is stored as a `tool` message with the matching `tool_call_id`.
+- Tool outcomes and their state checkpoint are committed together. If the process stops while a tool is executing, resume writes an explicit interrupted result and lets the model reassess; a side effect may already have occurred, so exactly-once execution is not guaranteed.
+- Transient model-request errors pause the task; resuming the same session keeps the original goal and usage totals.
+- The request context keeps the system instruction, recent messages, and complete tool-call/result pairs. Old text is clipped deterministically; task state remains authoritative.
+- Relevant wiki pages are retrieved lexically and added as short excerpts. Older run history remains in SQLite and is not all replayed to the model.
+
+Run and resume with the same database and session ID:
 
 ```bash
-poetry install
-poetry run python -m nexus.cli chat --model ollama/llama3
+python -m pip install -e .
+python -m nexus.cli run "Inspect this repository and fix the failing tests" \
+  --model ollama/llama3 --db aetheris_memory.db \
+  --session repair-tests --max-steps 30 --cost-budget 0.50
 ```
 
-Run one autonomous task with explicit limits:
+The interactive CLI can reopen the same session with `/resume repair-tests`. Use `/status` to inspect the persisted state and run counters.
+
+## Durable project knowledge
+
+`remember` writes Markdown pages under `.aetheris/wiki/`; `recall` and the runtime's lexical retrieval read them in later tasks. The files are human-readable and generated knowledge is ignored by Git by default. SQLite is used for ordered events and checkpoints; Markdown is used for stable project facts and decisions. A vector database would add another service before this small corpus needs semantic retrieval.
+
+## Policy and safety
+
+The default watchdog pauses after three consecutive failed actions. It is consulted after failures and periodically, not after every successful tool call. Jev is an optional, narrow `continue` or `pause for review` signal. If Jev cannot be imported or called, the deterministic policy takes over. Jev does not generate code or replace the main model.
+
+`write_file`, `edit_file`, and shell execution require an interactive approval. Approval is a user decision gate; it is not an OS sandbox. Shell commands run with the current process user's permissions. The repository does not claim protection against malicious commands. Use a disposable container or a separate OS account for untrusted repositories.
+
+## Offline evaluation
+
+The checked-in task set covers symbol search, file reading, a small edit followed by a unit test, one controlled tool failure and retry, an approval denial, recovery from an interrupted tool call, and durable knowledge recall.
 
 ```bash
-poetry run python -m nexus.cli run \
-  "Inspect this repository and fix the failing tests" \
-  --model ollama/llama3 \
-  --session repair-tests \
-  --max-steps 30 \
-  --cost-budget 0.50
+python evals/run.py
+python -m pytest -q
 ```
 
-Resume later by reopening the same session in chat mode:
+The runner uses a scripted local model and a test-only tool that fails once. It makes no API calls. It reports task success, steps, tool calls and failures, recovery, prompt/completion tokens, estimated cost when available, latency, review pauses, and checkpoint counts. Token usage is fixed by the mock responses; cost is intentionally `null`, and latency is machine-dependent. These checks demonstrate runtime behavior, not model quality or a benchmark score.
 
-```text
-/resume repair-tests
-```
+## Design choices
 
-## Optional Jev policy gate
-
-The default policy is deterministic and pauses after repeated failures. To use Jev as a separate decision layer:
-
-```bash
-poetry run pip install "typesafe-sdk>=0.7.1,<0.8"
-export TYPESAFE_API_KEY=...
-export AETHERIS_DECISION_POLICY=jev
-```
-
-Jev is intentionally not the worker model. It only answers the narrow question: should this run continue or pause for human review? To keep the control plane cheap, the policy is consulted after failures and periodically rather than after every successful tool call.
-
-## Durable knowledge
-
-The `remember` skill writes Markdown pages under `.aetheris/wiki/`. The `recall` skill searches those pages in later sessions. This keeps stable project knowledge readable by both humans and agents and avoids hiding all memory inside an embedding database. Generated wiki pages are ignored by Git by default to reduce the chance of committing private context.
+| Choice | Reason | Cost or limitation |
+| --- | --- | --- |
+| SQLite checkpoints | One local file, transactions, and enough durability for a single-user agent | Not a multi-worker or distributed store |
+| Markdown wiki | Reviewable, editable, and easy to keep with project knowledge | Lexical retrieval misses semantic matches |
+| Deterministic budgets | The runtime can enforce numeric limits without model interpretation | Cost limits apply only when LiteLLM can estimate provider cost; one model response can cross the threshold before the next tool is blocked; the step budget still applies |
+| Optional Jev watchdog | Adds a narrow review signal without changing the worker model | Adds latency and a service dependency when enabled |
 
 ## Project layout
 
 ```text
-nexus/
-  core/
-    agent.py       # reasoning/action loop
-    memory.py      # SQLite messages, state, checkpoints
-    state.py       # typed task state
-    policy.py      # heuristic and optional Jev gate
-    knowledge.py   # Markdown long-term knowledge
-    tracker.py     # token and cost accounting
-  skills/          # dynamically discovered tools
-  cli.py           # minimal interactive and one-shot CLI
+nexus/core/agent.py       # ReAct loop, bounded context, policy checks
+nexus/core/state.py      # Typed task state and counters
+nexus/core/memory.py     # SQLite history, atomic checkpoints, recovery
+nexus/core/knowledge.py  # Markdown wiki and lexical retrieval
+nexus/core/policy.py     # Deterministic and optional Jev watchdog
+nexus/skills/             # Small file, search, shell, and knowledge tools
+evals/tasks.jsonl        # Reproducible offline scenarios
+evals/run.py             # Scripted-model evaluation runner
+tests/                   # Runtime, protocol, persistence, and policy tests
 ```
 
-## Design principles
+## Limitations
 
-- Keep deterministic control flow in code.
-- Give the model tools, not hidden side effects.
-- Persist enough state to recover from interruption.
-- Separate transient conversation history from durable knowledge.
-- Put hard limits around autonomous execution.
-- Prefer a clean pause over uncontrolled retries.
+- Aetheris is a single-process, local-first prototype. SQLite and Markdown are not shared across workers.
+- A hard cost ceiling cannot be guaranteed: providers may not expose a usable estimate, and one model response can cross the threshold before execution is paused. The step ceiling is enforced regardless.
+- Approval does not isolate files, processes, or network access. There is no container sandbox.
+- Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.
+- A long run still depends on the model's ability to choose useful actions. Checkpoints preserve progress; they do not guarantee completion.
 
 ## License
 
