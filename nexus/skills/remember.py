@@ -7,7 +7,9 @@ from .base_skill import BaseSkill
 
 class RememberSchema(BaseModel):
     topic: str = Field(..., description="Short topic name for the durable note")
-    content: str = Field(..., description="Concise knowledge worth preserving across sessions")
+    content: str = Field(
+        ..., description="Concise knowledge worth preserving across sessions"
+    )
 
 
 class RememberSkill(BaseSkill):

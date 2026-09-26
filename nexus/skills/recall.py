@@ -6,7 +6,9 @@ from .base_skill import BaseSkill
 
 
 class RecallSchema(BaseModel):
-    query: str = Field(..., description="Text to search for in durable project knowledge")
+    query: str = Field(
+        ..., description="Text to search for in durable project knowledge"
+    )
     limit: int = Field(5, ge=1, le=10, description="Maximum number of matching pages")
 
 

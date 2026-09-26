@@ -28,6 +28,7 @@ class BaseSkill(ABC):
             return True
         try:
             from rich.prompt import Confirm
+
             return Confirm.ask(f"Approve {self.name}({arguments})?")
         except (EOFError, KeyboardInterrupt):
             return False

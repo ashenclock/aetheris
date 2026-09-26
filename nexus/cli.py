@@ -21,7 +21,9 @@ def expand_file_tags(text: str) -> str:
     for raw_path in re.findall(r"@([^\s]+)", text):
         path = Path(raw_path).expanduser()
         if path.is_file():
-            chunks.append(f"\nFile: {path}\n```\n{path.read_text(encoding='utf-8')}\n```")
+            chunks.append(
+                f"\nFile: {path}\n```\n{path.read_text(encoding='utf-8')}\n```"
+            )
     return "\n".join(chunks)
 
 
@@ -41,20 +43,32 @@ async def _chat(model: str, db_path: str, max_steps: int, cost_budget: float) ->
     await agent.init()
     prompt = PromptSession()
 
-    console.print(f"Aetheris ready. Model: [bold]{model}[/bold]. Type /help for commands.")
+    console.print(
+        f"Aetheris ready. Model: [bold]{model}[/bold]. Type /help for commands."
+    )
     try:
         while True:
-            raw = (await prompt.prompt_async(f"[{session_id}:{os.path.basename(os.getcwd())}] > ")).strip()
+            raw = (
+                await prompt.prompt_async(
+                    f"[{session_id}:{os.path.basename(os.getcwd())}] > "
+                )
+            ).strip()
             if not raw:
                 continue
             if raw in {"/exit", "/quit"}:
                 break
             if raw == "/help":
-                console.print("/new NAME, /resume NAME, /status, /exit. Use @path to attach a text file.")
+                console.print(
+                    "/new NAME, /resume NAME, /status, /exit. Use @path to attach a text file."
+                )
                 continue
             if raw == "/status":
                 state = await agent.memory.load_state()
-                console.print(state.model_dump_json(indent=2) if state else "No active task state.")
+                console.print(
+                    state.model_dump_json(indent=2)
+                    if state
+                    else "No active task state."
+                )
                 continue
             if raw.startswith("/new ") or raw.startswith("/resume "):
                 session_id = raw.split(maxsplit=1)[1]

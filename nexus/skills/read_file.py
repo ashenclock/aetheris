@@ -2,8 +2,12 @@ import os
 from pydantic import BaseModel, Field
 from .base_skill import BaseSkill
 
+
 class ReadFileSchema(BaseModel):
-    filepath: str = Field(..., description="The absolute or relative path to the file you want to read.")
+    filepath: str = Field(
+        ..., description="The absolute or relative path to the file you want to read."
+    )
+
 
 class ReadFileSkill(BaseSkill):
     @property
@@ -22,13 +26,13 @@ class ReadFileSkill(BaseSkill):
         filepath = kwargs.get("filepath", "")
         if not filepath:
             return "Error: filepath cannot be empty."
-            
+
         try:
             if not os.path.exists(filepath):
                 return f"Error: The file '{filepath}' does not exist."
             if not os.path.isfile(filepath):
                 return f"Error: '{filepath}' is not a valid file."
-                
+
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
             return content
