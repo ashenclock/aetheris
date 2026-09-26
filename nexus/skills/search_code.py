@@ -1,13 +1,16 @@
-import os
 import re
 from pathlib import Path
 from pydantic import BaseModel, Field
 from .base_skill import BaseSkill
 
+
 class SearchCodeSchema(BaseModel):
     pattern: str = Field(..., description="Regex pattern or text to search for")
-    extension: str = Field("", description="File extension to filter by (e.g. .py, .md)")
+    extension: str = Field(
+        "", description="File extension to filter by (e.g. .py, .md)"
+    )
     max_results: int = Field(20, description="Max number of results to return")
+
 
 class SearchCodeSkill(BaseSkill):
     @property
@@ -26,13 +29,13 @@ class SearchCodeSkill(BaseSkill):
         pattern = kwargs.get("pattern", "")
         extension = kwargs.get("extension", "")
         max_results = kwargs.get("max_results", 20)
-        
+
         if not pattern:
             return "Error: pattern cannot be empty."
-            
+
         results = []
         root = Path(".")
-        
+
         for file_path in root.rglob("*"):
             if file_path.is_dir():
                 continue
@@ -40,7 +43,7 @@ class SearchCodeSkill(BaseSkill):
                 continue
             if extension and not str(file_path).endswith(extension):
                 continue
-                
+
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     for i, line in enumerate(f, 1):
@@ -50,13 +53,13 @@ class SearchCodeSkill(BaseSkill):
                                 break
             except Exception:
                 continue
-                
+
             if len(results) >= max_results:
                 break
-                
+
         if not results:
             return f"No results found for '{pattern}'."
-            
+
         output = f"Found {len(results)} results for '{pattern}':\n\n"
         output += "\n".join(results)
         return output

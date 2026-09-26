@@ -1,10 +1,14 @@
 import os
-import glob
 from pydantic import BaseModel, Field
 from .base_skill import BaseSkill
 
+
 class ListDirSchema(BaseModel):
-    path: str = Field(..., description="The path to the directory you want to list. Defaults to '.' if empty.")
+    path: str = Field(
+        ...,
+        description="The path to the directory you want to list. Defaults to '.' if empty.",
+    )
+
 
 class ListDirSkill(BaseSkill):
     @property
@@ -23,17 +27,17 @@ class ListDirSkill(BaseSkill):
         path = kwargs.get("path", ".")
         if not path:
             path = "."
-            
+
         try:
             if not os.path.exists(path):
                 return f"Error: The path '{path}' does not exist."
             if not os.path.isdir(path):
                 return f"Error: '{path}' is a file, not a directory."
-                
+
             entries = os.listdir(path)
             if not entries:
                 return f"The directory '{path}' is empty."
-                
+
             result = f"Contents of '{path}':\n"
             for entry in entries:
                 full_path = os.path.join(path, entry)

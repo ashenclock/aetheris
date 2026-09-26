@@ -141,15 +141,91 @@ class SessionMemory:
                 row = await cursor.fetchone()
         return TaskState.model_validate_json(row[0]) if row else None
 
-    async def checkpoint(self, state: TaskState, reason: str) -> None:
+    async def checkpoint(
+        self,
+        state: TaskState,
+        reason: str,
+        *,
+        tool_results: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Atomically persist state, checkpoint, and any matching tool results."""
         state.checkpoint_count += 1
-        await self.save_state(state)
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for result in tool_results or []:
+                await db.execute(
+                    """
+                    INSERT INTO messages (
+                        session_id, role, content, name, tool_call_id, tool_calls_json
+                    ) VALUES (?, 'tool', ?, ?, ?, NULL)
+                    """,
+                    (
+                        self.session_id,
+                        result["content"],
+                        result["name"],
+                        result["tool_call_id"],
+                    ),
+                )
+            await self._save_state(db, state)
             await db.execute(
                 "INSERT INTO checkpoints (session_id, state_json, reason) VALUES (?, ?, ?)",
                 (self.session_id, state.model_dump_json(), reason),
             )
             await db.commit()
+
+    async def _save_state(self, db: aiosqlite.Connection, state: TaskState) -> None:
+        await db.execute(
+            """
+            INSERT INTO task_state (session_id, state_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(session_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (self.session_id, state.model_dump_json()),
+        )
+
+    async def recover_pending_tool_calls(self, state: TaskState) -> int:
+        """Close tool calls left without results by an interrupted process."""
+        history = await self.get_history()
+        pending: dict[str, str] = {}
+        for message in history:
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls", []):
+                    pending[call["id"]] = call.get("function", {}).get("name", "tool")
+            elif message.get("role") == "tool":
+                pending.pop(message.get("tool_call_id"), None)
+
+        if not pending:
+            return 0
+
+        reason = "Process stopped before the tool result was recorded."
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for call_id, name in pending.items():
+                result = f"Error: {reason} Resume the task to let the agent reassess."
+                await db.execute(
+                    """
+                    INSERT INTO messages (
+                        session_id, role, content, name, tool_call_id, tool_calls_json
+                    ) VALUES (?, 'tool', ?, ?, ?, NULL)
+                    """,
+                    (self.session_id, result, name, call_id),
+                )
+                state.record_step(name, success=False, error=result)
+                state.recovered_interrupted_calls += 1
+            state.checkpoint_count += 1
+            await self._save_state(db, state)
+            await db.execute(
+                "INSERT INTO checkpoints (session_id, state_json, reason) VALUES (?, ?, ?)",
+                (
+                    self.session_id,
+                    state.model_dump_json(),
+                    "Recovered interrupted tool calls.",
+                ),
+            )
+            await db.commit()
+        return len(pending)
 
     async def latest_checkpoint(self) -> tuple[TaskState, str] | None:
         async with aiosqlite.connect(self.db_path) as db:

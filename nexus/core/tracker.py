@@ -1,44 +1,55 @@
+from __future__ import annotations
+
 import logging
+import math
+from typing import Any
+
+from .state import TaskState
 
 logger = logging.getLogger("AetherisTracker")
 
+
 class CostTracker:
-    """
-    Tracks cost and tokens used across the session.
-    """
-    def __init__(self):
-        self.total_cost = 0.0
+    """Track token totals and provider-reported cost estimates for one task."""
+
+    def __init__(self) -> None:
         self.prompt_tokens = 0
         self.completion_tokens = 0
-        self.latest_prompt_tokens = 0
-        self.latest_completion_tokens = 0
-        
-    def add_usage(self, response):
-        """
-        Extracts usage from a LiteLLM response and updates totals.
-        """
-        try:
-            usage = response.usage
-            self.latest_prompt_tokens = getattr(usage, 'prompt_tokens', 0)
-            self.latest_completion_tokens = getattr(usage, 'completion_tokens', 0)
-            
-            self.prompt_tokens += self.latest_prompt_tokens
-            self.completion_tokens += self.latest_completion_tokens
-            
-            # LiteLLM sometimes calculates cost via response._hidden_params["custom_llm_provider"]
-            import litellm
-            cost = litellm.completion_cost(completion_response=response)
-            if cost:
-                self.total_cost += cost
-                
-        except Exception as e:
-            logger.debug(f"Could not track cost: {e}")
+        self.estimated_cost_usd: float | None = None
+        self.cost_estimate_available = True
 
-    def summary(self):
+    def restore(self, state: TaskState) -> None:
+        self.prompt_tokens = state.prompt_tokens
+        self.completion_tokens = state.completion_tokens
+        self.estimated_cost_usd = state.estimated_cost_usd
+        self.cost_estimate_available = state.cost_estimate_available
+
+    def add_usage(self, response: Any) -> dict[str, float | int | bool | None]:
+        usage = getattr(response, "usage", None)
+        self.prompt_tokens += int(getattr(usage, "prompt_tokens", 0) or 0)
+        self.completion_tokens += int(getattr(usage, "completion_tokens", 0) or 0)
+
+        if self.cost_estimate_available:
+            try:
+                import litellm
+
+                cost = litellm.completion_cost(completion_response=response)
+                if cost is None or not math.isfinite(float(cost)):
+                    raise ValueError("provider did not return a finite cost estimate")
+                if self.estimated_cost_usd is None:
+                    self.estimated_cost_usd = 0.0
+                self.estimated_cost_usd += float(cost)
+            except Exception as exc:
+                self.cost_estimate_available = False
+                self.estimated_cost_usd = None
+                logger.debug("Provider cost estimate unavailable: %s", exc)
+
+        return self.summary()
+
+    def summary(self) -> dict[str, float | int | bool | None]:
         return {
-            "total_cost_usd": self.total_cost,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
-            "latest_prompt_tokens": self.latest_prompt_tokens,
-            "latest_completion_tokens": self.latest_completion_tokens
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "cost_estimate_available": self.cost_estimate_available,
         }

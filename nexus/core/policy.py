@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
 from .state import TaskState
+
+logger = logging.getLogger("AetherisPolicy")
 
 
 @dataclass(frozen=True)
@@ -45,33 +48,46 @@ class JevPolicy:
         self.confidence_threshold = confidence_threshold
 
     async def decide(self, state: TaskState) -> PolicyDecision:
-        response = await self._client.system_one(
-            state={
-                "goal": state.goal,
-                "step_count": state.step_count,
-                "max_steps": state.max_steps,
-                "consecutive_failures": state.consecutive_failures,
-                "last_action": state.last_action,
-                "last_error": state.last_error,
-            },
-            questions={
-                "horizon_gate": self._Choice(
-                    instructions=(
-                        "Should this autonomous run continue, or pause for human review? "
-                        "Pause only when repeated failures or ambiguous recovery make further "
-                        "autonomous execution unsafe or wasteful."
-                    ),
-                    criteria={
-                        "continue": "The run is making progress and can safely continue.",
-                        "pause": "The run should stop and request human review before proceeding.",
-                    },
+        try:
+            response = await self._client.system_one(
+                state={
+                    "goal": state.goal,
+                    "step_count": state.step_count,
+                    "max_steps": state.max_steps,
+                    "consecutive_failures": state.consecutive_failures,
+                    "last_action": state.last_action,
+                    "last_error": state.last_error,
+                },
+                questions={
+                    "horizon_gate": self._Choice(
+                        instructions=(
+                            "Should this autonomous run continue, or pause for human review? "
+                            "Pause only when repeated failures or ambiguous recovery make further "
+                            "autonomous execution unsafe or wasteful."
+                        ),
+                        criteria={
+                            "continue": "The run is making progress and can safely continue.",
+                            "pause": "The run should stop and request human review before proceeding.",
+                        },
+                    )
+                },
+            )
+            answer = response.choices["horizon_gate"]
+            if (
+                answer.choice == "pause"
+                and answer.confidence >= self.confidence_threshold
+            ):
+                return PolicyDecision(
+                    "pause", "Jev requested human review.", answer.confidence
                 )
-            },
-        )
-        answer = response.choices["horizon_gate"]
-        if answer.choice == "pause" and answer.confidence >= self.confidence_threshold:
-            return PolicyDecision("pause", "Jev requested human review.", answer.confidence)
-        return PolicyDecision("continue", "Jev allowed the run to continue.", answer.confidence)
+            return PolicyDecision(
+                "continue", "Jev allowed the run to continue.", answer.confidence
+            )
+        except Exception as exc:
+            logger.warning(
+                "Jev decision failed; applying deterministic policy: %s", exc
+            )
+            return await HeuristicPolicy().decide(state)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -79,5 +95,8 @@ class JevPolicy:
 
 def build_policy() -> DecisionPolicy:
     if os.getenv("AETHERIS_DECISION_POLICY", "heuristic").lower() == "jev":
-        return JevPolicy()
+        try:
+            return JevPolicy()
+        except RuntimeError as exc:
+            logger.warning("Jev is unavailable; using deterministic policy: %s", exc)
     return HeuristicPolicy()

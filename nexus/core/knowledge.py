@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 
@@ -22,12 +23,33 @@ class KnowledgeStore:
         return path
 
     def recall(self, query: str, limit: int = 5) -> list[tuple[Path, str]]:
-        needle = query.lower().strip()
-        matches: list[tuple[Path, str]] = []
+        terms = {
+            term
+            for term in re.findall(r"[a-z0-9_]{2,}", query.lower())
+            if term not in {"the", "and", "for", "with", "from", "this", "that"}
+        }
+        matches: list[tuple[int, Path, str]] = []
         for path in sorted(self.root.glob("*.md")):
-            text = path.read_text(encoding="utf-8")
-            if needle in path.stem.lower() or needle in text.lower():
-                matches.append((path, text))
-            if len(matches) >= limit:
-                break
-        return matches
+            content = path.read_text(encoding="utf-8")
+            words = Counter(
+                re.findall(r"[a-z0-9_]{2,}", f"{path.stem} {content}".lower())
+            )
+            score = sum(words[term] for term in terms)
+            if score:
+                matches.append((score, path, content))
+        matches.sort(key=lambda item: (-item[0], item[1].name))
+        return [(path, content) for _, path, content in matches[:limit]]
+
+    def context(self, query: str, limit: int = 3, char_limit: int = 1_200) -> str:
+        matches = self.recall(query, limit=limit)
+        if not matches:
+            return ""
+        pages = []
+        for path, content in matches:
+            excerpt = content.strip()
+            if len(excerpt) > char_limit:
+                excerpt = (
+                    excerpt[: char_limit - 24].rstrip() + "\n[page excerpt omitted]"
+                )
+            pages.append(f"- {path.stem}: {excerpt}")
+        return "\n".join(pages)
