@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -297,6 +300,62 @@ def skills() -> None:
             "required" if skill.requires_confirmation else "not required",
             skill.description,
         )
+    console.print(table)
+
+
+@app.command()
+def doctor(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    model: str = typer.Option(
+        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
+    ),
+) -> None:
+    """Check local provider, workspace, optional packages, and child routing."""
+    root = Path(workspace).expanduser().resolve()
+    checks: list[tuple[str, str, str]] = []
+
+    checks.append(("python", sys.version.split()[0], "ok"))
+    checks.append(
+        (
+            "workspace",
+            str(root),
+            "ok" if root.exists() and os.access(root, os.W_OK) else "check path/writability",
+        )
+    )
+    if model.startswith("responses/"):
+        checks.append(
+            (
+                "OpenAI API key",
+                "configured" if os.getenv("OPENAI_API_KEY") else "missing",
+                "ok" if os.getenv("OPENAI_API_KEY") else "set OPENAI_API_KEY",
+            )
+        )
+        checks.append(
+            (
+                "openai SDK",
+                "installed" if importlib.util.find_spec("openai") else "missing",
+                "ok" if importlib.util.find_spec("openai") else "pip install -e '.[transcription]'",
+            )
+        )
+    elif model.startswith("ollama/"):
+        installed = shutil.which("ollama") is not None
+        checks.append(("Ollama CLI", "installed" if installed else "missing", "ok" if installed else "install Ollama"))
+    else:
+        checks.append(("provider", model, "verify provider credentials"))
+
+    subagent_model = os.getenv("AETHERIS_SUBAGENT_MODEL") or model
+    checks.append(("sub-agent model", subagent_model, "inherits parent" if subagent_model == model else "explicit override"))
+    checks.append(("sub-agent budget", os.getenv("AETHERIS_SUBAGENT_BUDGET_USD", "0.25"), "total shared reservation"))
+    checks.append(("max sub-agents", os.getenv("AETHERIS_MAX_SUBAGENTS", "2"), "bounded"))
+    checks.append(("Streamlit", "installed" if importlib.util.find_spec("streamlit") else "missing", "optional web demo"))
+    checks.append(("Docker CLI", "installed" if shutil.which("docker") else "missing", "daemon still needs to be running"))
+
+    table = Table(title="Aetheris doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Value")
+    table.add_column("Notes")
+    for name, value, note in checks:
+        table.add_row(name, value, note)
     console.print(table)
 
 

@@ -125,6 +125,7 @@ an external provider without authorization, retention review, and consent.
 Useful CLI commands are:
 
 ```bash
+aetheris doctor --workspace .
 aetheris chat --workspace . --session repair-tests
 aetheris run "Inspect the test layout" --json
 aetheris status --db aetheris_memory.db --session repair-tests

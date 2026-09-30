@@ -12,6 +12,16 @@ python evals/demo.py
 python evals/run.py --output /tmp/aetheris-evaluation.json
 ```
 
+Run the read-only environment check before a live session:
+
+```bash
+aetheris doctor --workspace .
+```
+
+It reports provider credentials without printing their values, optional SDKs,
+the workspace, child routing, Streamlit, and Docker CLI availability. It does
+not install packages or silently change providers.
+
 For a local Ollama model, start Ollama separately and pull a model that is
 available on the machine:
 
