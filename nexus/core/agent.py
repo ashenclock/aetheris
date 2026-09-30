@@ -22,6 +22,7 @@ from nexus.skills.run_command import RunCommandSkill
 from nexus.skills.search_code import SearchCodeSkill
 from nexus.skills.write_file import WriteFileSkill
 from nexus.skills.use_skill import UseSkillSkill
+from nexus.skills.web_search import WebSearchSkill
 from nexus.skills.mcp_tool import MCPToolSkill
 from nexus.mcp import MCPConnectionError, discover_tools
 
@@ -45,6 +46,7 @@ SKILL_TYPES = (
     SearchCodeSkill,
     WriteFileSkill,
     UseSkillSkill,
+    WebSearchSkill,
 )
 
 
@@ -158,6 +160,7 @@ class Agent:
             "recall",
             "search_code",
             "use_skill",
+            "web_search",
         }
         for skill_type in SKILL_TYPES:
             if skill_type is DelegateTaskSkill:

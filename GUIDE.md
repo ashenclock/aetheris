@@ -125,6 +125,29 @@ In execute mode each discovered tool is approval-gated. Plan mode does not
 start MCP processes. MCP descriptions and server instructions are untrusted
 data, and the local adapter is not a sandbox.
 
+## 1.6 Search the web explicitly
+
+Web search is a first-class skill with a different boundary from shell
+execution. It asks for approval, limits the result count, supports domain
+filters, and returns only title/URL/snippet observations. The default `ddgs`
+backend is keyless; `BRAVE_SEARCH_API_KEY` switches to Brave Search API.
+
+```bash
+uv sync --extra search
+aetheris search "Python asyncio documentation" \
+  --domain python.org --max-results 3
+```
+
+The snippets are untrusted external data. They do not override the system
+prompt and are not executed as commands. To let the agent request search
+inside a live `chat` or `run`, say explicitly that it may use `web_search`;
+Aetheris asks for approval at the tool boundary. Plan mode exposes the
+read-only search schema, but cannot execute the search without approval.
+
+For the Streamlit demo, use the sidebar's **Search the public web** button. The
+button is the UI approval gate, and its result is displayed as code rather than
+injected into the repository-analysis conversation.
+
 ## 2. Observe a task from another terminal
 
 Use a dedicated database and session for every experiment:

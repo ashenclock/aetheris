@@ -33,6 +33,7 @@ from nexus.project import (
     project_dir,
 )
 from nexus.transcription import TranscriptionError, transcribe_file
+from nexus.skills.web_search import WebSearchSkill
 
 load_dotenv()
 DEFAULT_MODEL = os.getenv("AETHERIS_MODEL", "ollama/llama3")
@@ -378,6 +379,40 @@ def resume(
             agent_profile,
         )
     )
+
+
+@app.command("search")
+def search(
+    query: str = typer.Argument(..., help="Question or keywords to search for."),
+    max_results: int = typer.Option(5, "--max-results", min=1, max=8),
+    region: str = typer.Option("us-en", "--region"),
+    timelimit: str | None = typer.Option(None, "--timelimit"),
+    backend: str = typer.Option("auto", "--backend"),
+    domain: list[str] = typer.Option(
+        [], "--domain", help="Restrict results to this domain; repeatable."
+    ),
+) -> None:
+    """Search the public web through the approval-gated native search skill."""
+
+    async def search_once() -> str:
+        skill = WebSearchSkill()
+        arguments = {
+            "query": query,
+            "max_results": max_results,
+            "region": region,
+            "timelimit": timelimit,
+            "backend": backend,
+            "domains": domain,
+        }
+        if not await skill.confirm(arguments):
+            raise typer.Exit(code=1)
+        return await skill.execute(**arguments)
+
+    result = asyncio.run(search_once())
+    if result.startswith("Error:"):
+        console.print(f"[red]{result}[/red]")
+        raise typer.Exit(code=1)
+    console.print(Panel(result, title="External web search", border_style="cyan"))
 
 
 async def _run(

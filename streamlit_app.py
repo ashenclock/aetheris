@@ -13,6 +13,7 @@ from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
 from nexus.transcription import TranscriptionError, transcribe_file
 from nexus.web.github import GitHubRepositoryError, download_public_repository
+from nexus.skills.web_search import WebSearchSkill
 
 
 READ_ONLY_TOOLS = {"list_directory", "read_file", "search_code", "recall"}
@@ -28,6 +29,15 @@ def _secret_or_env(name: str) -> str | None:
 
 def _run(coroutine):
     return asyncio.run(coroutine)
+
+
+async def _search_web(query: str, domains: list[str]) -> str:
+    """Run the bounded search skill behind an explicit UI button."""
+    return await WebSearchSkill().execute(
+        query=query,
+        max_results=5,
+        domains=domains,
+    )
 
 
 async def _ask_agent(
@@ -189,6 +199,25 @@ with st.sidebar:
 
     if st.session_state.get("transcription"):
         st.text_area("Latest transcript", st.session_state.transcription, height=180)
+
+    st.subheader("Web search")
+    st.caption(
+        "The button is the approval gate. Results are bounded snippets and are not"
+        " automatically sent to the agent."
+    )
+    web_query = st.text_input("Search query")
+    web_domains = st.text_input("Domains (optional, comma-separated)")
+    if st.button("Search the public web") and web_query.strip():
+        brave_key = _secret_or_env("BRAVE_SEARCH_API_KEY")
+        if brave_key:
+            os.environ.setdefault("BRAVE_SEARCH_API_KEY", brave_key)
+        domains = [item.strip() for item in web_domains.split(",") if item.strip()]
+        with st.spinner("Searching the public web..."):
+            search_result = _run(_search_web(web_query, domains))
+        if search_result.startswith("Error:"):
+            st.error(search_result)
+        else:
+            st.code(search_result)
 
 if st.session_state.get("offline_summary"):
     summary = st.session_state.offline_summary

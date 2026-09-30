@@ -113,6 +113,16 @@ service dependency, and keeps the persistence model separate from transient
 execution history. Embeddings would become useful after measuring a real recall
 problem, not before.
 
+## Native web search
+
+`web_search` is an explicit skill, separate from `run_command`. It uses a
+bounded DDGS adapter by default or the Brave Search API when a key is supplied,
+asks for approval, applies optional domain filters, and stores the result as a
+normal tool observation. Titles and snippets are untrusted excerpts; they are
+not proof that a page was opened and cannot change policy or trigger commands.
+The Streamlit surface exposes the same operation behind a button but keeps it
+out of the hosted repository-agent tool set.
+
 ## Jev's role
 
 Jev is an optional secondary watchdog. It receives typed runtime facts and
@@ -161,7 +171,7 @@ real skills. It measures status, steps, tool calls, failures, recovery,
 approval pauses, tokens, latency, and checkpoints. Mock cost is intentionally
 `null`; these results test runtime control flow, not model quality.
 
-The measured run on this checkout was 7/7 successful tasks, 12 tool calls, 5
+The measured run on this checkout was 7/7 successful tasks, 12 tool calls, 6
 tool failures, 2 recovery cases, 1 approval pause, 170 prompt tokens, and 85
 completion tokens. Latency is machine-dependent.
 
@@ -357,10 +367,10 @@ nexus/                         installable runtime package
   project.py / mcp.py          local config and the small MCP stdio adapter
   core/                        loop, state, SQLite memory, policy, prompts
   skills/                      explicit tools and approval boundaries
-  web/                         bounded public-GitHub archive connector
+  web/                         bounded GitHub and search adapters
 evals/                         deterministic scripted-model scenarios
 tests/                         focused runtime and protocol tests
-streamlit_app.py              read-only hosted demo
+streamlit_app.py              read-only hosted demo and explicit search UI
 Dockerfile                    portable CLI image
 Dockerfile.streamlit          portable web image
 .aetheris/                     local wiki, plans, profiles, MCP config (ignored)

@@ -114,6 +114,28 @@ process. Aetheris can connect to project-local stdio MCP servers for the CLI,
 but the hosted read-only surface keeps that process and credential boundary
 out of a public Streamlit deployment.
 
+## Native web search
+
+`web_search` is a separate, approval-gated skill; it is not a shell shortcut
+around `curl`. It returns at most eight title/URL/snippet records, supports
+domain filters, and marks the result as external untrusted data. It does not
+claim that a snippet was verified or execute instructions found in one.
+
+The default backend is the optional `ddgs` package and needs no API key. Set
+`AETHERIS_SEARCH_BACKEND` to select a DDGS backend, or set
+`BRAVE_SEARCH_API_KEY` to use the Brave Search API instead. The direct CLI
+command is useful for a transparent demo:
+
+```bash
+uv sync --extra search
+aetheris search "Python asyncio documentation" --domain python.org --max-results 3
+```
+
+The command asks for approval before making the external request. The
+Streamlit demo exposes the same bounded search behind an explicit button, but
+keeps it separate from the hosted read-only repository agent so search queries
+and external snippets do not silently enter the model context.
+
 ## API transcription and CLI surface
 
 The optional transcription path uses the hosted OpenAI Audio API; it does not
@@ -137,6 +159,7 @@ Useful CLI commands are:
 aetheris doctor --workspace .
 aetheris providers
 aetheris providers --json
+aetheris search "Python asyncio documentation" --domain python.org
 aetheris chat --workspace . --session repair-tests
 aetheris run "Inspect the test layout" --json
 aetheris status --db aetheris_memory.db --session repair-tests
@@ -269,14 +292,14 @@ nexus/                    # Runtime package installed by the CLI and Docker imag
   mcp.py                  # small JSONL stdio MCP client
   core/                   # Agent loop, state, memory, knowledge, policy, tracking
   skills/                 # Explicit tools plus approval-gated MCP wrappers
+  web/                    # Bounded GitHub and DDGS/Brave search adapters
 evals/                    # Offline scripted-model scenarios and demo
 tests/                    # Runtime, protocol, persistence, and policy tests
 Dockerfile                # Small non-root portable image
 Dockerfile.streamlit      # Optional non-root Streamlit web image
 .dockerignore             # Excludes state, caches, tests, and Git metadata
 requirements.txt          # Streamlit Community Cloud dependencies
-streamlit_app.py          # Read-only GitHub exploration surface
-nexus/web/                 # Bounded GitHub archive connector
+streamlit_app.py          # Read-only GitHub exploration and explicit search UI
 nexus/api.py               # Small authenticated adapter for n8n/webhooks
 nexus/transcription.py     # Optional hosted audio transcription adapter
 README.md                 # Architecture, usage, limitations, and trade-offs
