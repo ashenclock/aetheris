@@ -146,6 +146,14 @@ child report is an observation in the parent loop, not an independent source
 of authority. This makes delegation useful for long-horizon decomposition
 without hiding the control flow in an autonomous swarm.
 
+Child sessions use the same provider/model as the parent by default. For a
+cheap local research lane, set `AETHERIS_SUBAGENT_MODEL` in `.env`, for example
+`ollama/llama3.2:3b`. `AETHERIS_SUBAGENT_BUDGET_USD` is a conservative total
+reservation shared by children, and `AETHERIS_MAX_SUBAGENTS` limits the number
+of child sessions. If a provider does not report cost, the reservation is
+treated as spent instead of silently allowing more calls. Parent state exposes
+child sessions, failures, token counts, and estimated cost separately.
+
 ## Memory, wiki, and retrieval
 
 The runtime separates three things:

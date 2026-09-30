@@ -367,6 +367,13 @@ but it also introduces cost, latency, duplicate context, and aggregation risk.
 The honest production question is not “how many agents can I spawn?” but “what
 independent work justifies another bounded context?”
 
+Child sessions inherit the parent provider/model by default. The operator can
+set `AETHERIS_SUBAGENT_MODEL` to a smaller local model, with a shared
+`AETHERIS_SUBAGENT_BUDGET_USD`, `AETHERIS_MAX_SUBAGENTS`, and a shorter child
+context. The parent records child token/cost/failure counters. This is a
+deterministic routing choice, not an automatic provider switch: silently
+falling back can change privacy, quality, and billing semantics.
+
 The Markdown wiki is an LLM-assisted knowledge base: the model proposes a
 fact, source, and optional `[[page-topic]]` links; SQLite remains the execution
 record. `aetheris wiki --graph` gives a lightweight Obsidian-like view. The

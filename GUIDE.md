@@ -32,6 +32,21 @@ cp .env.example .env
 The CLI loads `.env`. An explicit `--model` argument always takes precedence.
 Never put a key in a task prompt, repository file, slide, or git commit.
 
+Child routing is explicit and conservative:
+
+```env
+# Empty means inherit the parent provider/model.
+AETHERIS_SUBAGENT_MODEL=ollama/llama3.2:3b
+AETHERIS_SUBAGENT_BUDGET_USD=0.25
+AETHERIS_MAX_SUBAGENTS=2
+AETHERIS_CONTEXT_CHARS=24000
+```
+
+The parent reserves a shared child budget before starting a child. Child
+sessions use their own SQLite session IDs (`parent:subagent:N`) and a shorter
+context. If provider pricing is unavailable, the reservation is treated as
+spent. This is intentionally explicit rather than an invisible provider switch.
+
 ## 2. Observe a task from another terminal
 
 Use a dedicated database and session for every experiment:
@@ -218,7 +233,31 @@ directory, the training script, the recorded metrics, and the Aetheris
 checkpoints; do not present a metric as meaningful without describing the
 dataset and split.
 
-## 6. Failure experiments
+## 6. Test delegation explicitly
+
+Start a normal parent session and ask it to use the built-in `delegate_task`
+skill for a bounded read-only question:
+
+```text
+Delegate one read-only research task to a child agent: inspect the repository
+layout and identify the three files most relevant to the current goal. Return
+file paths, evidence, and unresolved risks. Do not delegate again.
+```
+
+The child inherits the parent provider/model unless `AETHERIS_SUBAGENT_MODEL`
+is set. Inspect the parent state:
+
+```bash
+aetheris status --db "$STATE_DB" --session web-demo --json
+sqlite3 "$STATE_DB" \
+  "select session_id,state_json from task_state where session_id like 'web-demo:subagent:%';"
+```
+
+The parent state exposes child sessions, child failures, child token totals,
+and the durable child budget ledger. A second delegation is denied when the
+configured child count or shared budget is exhausted.
+
+## 7. Failure experiments
 
 These are useful demonstrations because they make the runtime behavior visible:
 
