@@ -411,9 +411,11 @@ streamlit run streamlit_app.py
 docker build -f Dockerfile.streamlit -t aetheris-web:local .
 ```
 
-The hosted demo downloads a bounded public GitHub archive, uses an isolated
-temporary workspace, and exposes only read-only tools. It demonstrates the
-runtime and protocol without pretending to sandbox arbitrary shell execution.
+The hosted demo downloads a public GitHub archive with compressed and expanded
+size/file-count limits, rejects traversal, links, and special files, uses an
+isolated temporary workspace, and exposes only read-only tools. It demonstrates
+the runtime and protocol without pretending to sandbox arbitrary shell
+execution.
 For Community Cloud, `requirements.txt` and `streamlit_app.py` are at the
 repository root and credentials belong in platform secrets.
 

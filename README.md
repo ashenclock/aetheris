@@ -76,7 +76,9 @@ The repository also includes a small hosted-demo surface in
 `streamlit_app.py`. It downloads a bounded archive of a public GitHub
 repository into a temporary workspace, starts Aetheris with the same runtime,
 and exposes only read-only tools (`list_directory`, `read_file`, `search_code`,
-and `recall`). The UI shows the answer, authoritative task state, checkpoint
+and `recall`). Downloads are capped at 50 MiB compressed and 100 MiB / 10,000
+regular files when extracted; archive traversal, links, and special files are
+rejected. The UI shows the answer, authoritative task state, checkpoint
 counters, and the persisted tool protocol. It does not expose shell, file
 writes, edits, or Git pushes.
 

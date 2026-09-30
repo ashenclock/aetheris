@@ -64,3 +64,18 @@ def test_archive_validation_rejects_special_files(tmp_path):
     member.type = tarfile.CHRTYPE
     with pytest.raises(GitHubRepositoryError):
         _validate_archive_members([member], tmp_path)
+
+
+def test_archive_validation_bounds_expanded_file_count(tmp_path):
+    members = [_member(f"repo/file-{index}.txt") for index in range(3)]
+
+    with pytest.raises(GitHubRepositoryError, match="extraction file or size limit"):
+        _validate_archive_members(members, tmp_path, max_files=2)
+
+
+def test_archive_validation_bounds_expanded_size(tmp_path):
+    member = _member("repo/expanded.txt")
+    member.size = 11
+
+    with pytest.raises(GitHubRepositoryError, match="extraction file or size limit"):
+        _validate_archive_members([member], tmp_path, max_extracted_bytes=10)

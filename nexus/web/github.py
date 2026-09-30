@@ -10,6 +10,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+MAX_ARCHIVE_FILES = 10_000
+MAX_EXTRACTED_BYTES = 100 * 1024 * 1024
+
 
 class GitHubRepositoryError(RuntimeError):
     """Raised when a public GitHub repository cannot be downloaded safely."""
@@ -22,9 +25,15 @@ class GitHubRepository:
 
 
 def _validate_archive_members(
-    members: list[tarfile.TarInfo], extraction_root: Path
+    members: list[tarfile.TarInfo],
+    extraction_root: Path,
+    *,
+    max_files: int = MAX_ARCHIVE_FILES,
+    max_extracted_bytes: int = MAX_EXTRACTED_BYTES,
 ) -> None:
-    """Reject archive entries that could escape or alter the extraction root."""
+    """Reject unsafe archives and bound their expanded file count and size."""
+    files = 0
+    total_size = 0
     root = extraction_root.resolve()
     for member in members:
         target = (extraction_root / member.name).resolve()
@@ -38,6 +47,13 @@ def _validate_archive_members(
             raise GitHubRepositoryError(
                 "GitHub archive contains an unsupported special file."
             )
+        if member.isfile():
+            files += 1
+            total_size += member.size
+            if files > max_files or total_size > max_extracted_bytes:
+                raise GitHubRepositoryError(
+                    "GitHub archive exceeds the extraction file or size limit."
+                )
 
 
 def parse_repository_url(raw_url: str) -> GitHubRepository:
