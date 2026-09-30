@@ -379,7 +379,7 @@ why multiple replicas require shared state first.
 
 ## Limitations
 
-- Aetheris is a local-first prototype. An OS-level per-session lock rejects concurrent resumes on a shared local filesystem, but SQLite and Markdown are not distributed storage for replicas on separate disks.
+- Aetheris is a local-first prototype. An OS-level per-session lock rejects concurrent resumes on a shared local filesystem; SQLite databases with hard-link aliases are refused. SQLite and Markdown are not distributed storage for replicas on separate disks.
 - A hard cost ceiling cannot be guaranteed: providers may not expose a usable estimate, and one model response can cross the threshold before execution is paused. The step ceiling is enforced regardless.
 - Approval does not isolate files, processes, or network access. There is no container sandbox.
 - Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.

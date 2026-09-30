@@ -204,7 +204,8 @@ test verifies same-session exclusion and lock release after process termination.
   but there is no repair tool for arbitrary database corruption.
 - An OS-level lock rejects concurrent resumes of the same session across
   processes on a shared local filesystem. It is not a distributed lock for
-  network filesystems or replicas with separate disks.
+  network filesystems or replicas with separate disks; SQLite files with
+  multiple hard links are refused to avoid lock aliases.
 - A crash while a tool is executing is recoverable as an ambiguous interrupted
   call, not as proof that the external side effect did not happen.
 - Cancellation during a model request or tool execution checkpoints a paused
