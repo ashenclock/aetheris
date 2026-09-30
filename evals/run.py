@@ -95,7 +95,7 @@ def resolve_paths(value, root: Path):
 async def run_task(task: dict) -> dict:
     original_cwd = Path.cwd()
     with tempfile.TemporaryDirectory(prefix=f"aetheris-{task['id']}-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         for relative_path, content in task.get("fixtures", {}).items():
             target = (root / relative_path).resolve()
             if root not in target.parents:
@@ -213,9 +213,18 @@ async def run_task(task: dict) -> dict:
             os.chdir(original_cwd)
 
 
-async def run_suite() -> dict:
+async def run_suite(task_ids: set[str] | None = None) -> dict:
+    tasks = load_tasks()
+    if task_ids:
+        tasks = [task for task in tasks if task["id"] in task_ids]
+        missing = task_ids - {task["id"] for task in tasks}
+        if missing:
+            raise ValueError(f"Unknown evaluation task(s): {', '.join(sorted(missing))}")
+    if not tasks:
+        raise ValueError("No evaluation tasks selected")
+
     results = []
-    for task in load_tasks():
+    for task in tasks:
         results.append(await run_task(task))
     return {
         "mode": "offline scripted model; no external API calls",
@@ -239,8 +248,14 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, help="Optional path for the JSON summary"
     )
+    parser.add_argument(
+        "--task",
+        action="append",
+        dest="task_ids",
+        help="Run one task by ID. Repeat the option to run a focused subset.",
+    )
     args = parser.parse_args()
-    summary = asyncio.run(run_suite())
+    summary = asyncio.run(run_suite(set(args.task_ids) if args.task_ids else None))
     rendered = json.dumps(summary, indent=2)
     print(rendered)
     if args.output:

@@ -141,10 +141,19 @@ class Agent:
 
             state.record_usage(self.tracker.add_usage(response))
             await self.memory.checkpoint(state, "Model usage recorded.")
-            message = response.choices[0].message
-            tool_calls = self._serialize_tool_calls(
-                getattr(message, "tool_calls", None)
-            )
+            try:
+                message = response.choices[0].message
+                tool_calls = self._serialize_tool_calls(
+                    getattr(message, "tool_calls", None)
+                )
+            except (AttributeError, IndexError, TypeError, ValueError) as exc:
+                error = f"Malformed model response: {exc}"
+                state.record_step(
+                    "model_response", success=False, error=error, is_tool_call=False
+                )
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(state, error)
+                return self._pause_message(state, error)
 
             if not tool_calls:
                 reply = message.content or ""

@@ -139,6 +139,28 @@ async def test_failed_model_request_can_resume_same_task(temp_db):
     await second.close()
 
 
+@pytest.mark.asyncio
+async def test_malformed_model_response_pauses_with_recoverable_state(temp_db):
+    agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="bad-response")
+    await agent.init()
+
+    malformed = SimpleNamespace(choices=[])
+    with patch(
+        "nexus.core.agent.acompletion",
+        new_callable=AsyncMock,
+        return_value=malformed,
+    ):
+        reply = await agent.chat("Inspect the repository")
+
+    state = await agent.memory.load_state()
+    assert "malformed model response" in reply.lower()
+    assert state is not None
+    assert state.status == TaskStatus.PAUSED
+    assert state.last_action == "model_response"
+    assert state.step_count == 1
+    await agent.close()
+
+
 def test_bounded_history_keeps_complete_tool_protocol():
     call_a = {"id": "call-a", "function": {"name": "read_file", "arguments": "{}"}}
     call_b = {"id": "call-b", "function": {"name": "read_file", "arguments": "{}"}}
