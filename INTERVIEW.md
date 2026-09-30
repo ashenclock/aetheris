@@ -117,6 +117,12 @@ request failure falls back to `HeuristicPolicy`, which pauses after three
 consecutive tool failures. Jev does not choose tools or replace the worker
 model.
 
+The adapter can point at a local Jev-compatible Kev server with
+`AETHERIS_DECISION_BASE_URL` and `AETHERIS_DECISION_MODEL=kev-latest`. Kev is
+only a secondary signal; it is not a sandbox or a security proof. The adapter
+fails closed: low-confidence or ambiguous responses pause the run instead of
+silently allowing it.
+
 ## Human approval and security
 
 Approval is a user decision gate on `write_file`, `edit_file`, and

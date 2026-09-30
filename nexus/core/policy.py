@@ -44,7 +44,14 @@ class JevPolicy:
             ) from exc
 
         self._Choice = Choice
-        self._client = AsyncTypeSafeClient()
+        client_options = {}
+        if api_key := os.getenv("AETHERIS_DECISION_API_KEY"):
+            client_options["api_key"] = api_key
+        if base_url := os.getenv("AETHERIS_DECISION_BASE_URL"):
+            client_options["base_url"] = base_url
+        if model := os.getenv("AETHERIS_DECISION_MODEL"):
+            client_options["model"] = model
+        self._client = AsyncTypeSafeClient(**client_options)
         self.confidence_threshold = confidence_threshold
 
     async def decide(self, state: TaskState) -> PolicyDecision:
@@ -74,15 +81,18 @@ class JevPolicy:
             )
             answer = response.choices["horizon_gate"]
             if (
-                answer.choice == "pause"
+                answer.choice == "continue"
                 and answer.confidence >= self.confidence_threshold
             ):
                 return PolicyDecision(
-                    "pause", "Jev requested human review.", answer.confidence
+                    "continue", "Jev allowed the run to continue.", answer.confidence
                 )
-            return PolicyDecision(
-                "continue", "Jev allowed the run to continue.", answer.confidence
+            reason = (
+                "Jev requested human review."
+                if answer.choice == "pause"
+                else "Jev was uncertain; pausing rather than failing open."
             )
+            return PolicyDecision("pause", reason, answer.confidence)
         except Exception as exc:
             logger.warning(
                 "Jev decision failed; applying deterministic policy: %s", exc
@@ -97,6 +107,6 @@ def build_policy() -> DecisionPolicy:
     if os.getenv("AETHERIS_DECISION_POLICY", "heuristic").lower() == "jev":
         try:
             return JevPolicy()
-        except RuntimeError as exc:
+        except Exception as exc:
             logger.warning("Jev is unavailable; using deterministic policy: %s", exc)
     return HeuristicPolicy()

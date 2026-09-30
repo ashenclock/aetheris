@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,3 +34,20 @@ async def test_jev_request_error_uses_deterministic_fallback():
 
     decision = await policy.decide(state)
     assert decision.action == "pause"
+
+
+@pytest.mark.asyncio
+async def test_jev_low_confidence_does_not_fail_open():
+    policy = JevPolicy.__new__(JevPolicy)
+    policy._Choice = lambda **kwargs: kwargs
+    policy.confidence_threshold = 0.70
+    answer = SimpleNamespace(choice="continue", confidence=0.04)
+    policy._client = AsyncMock()
+    policy._client.system_one.return_value = SimpleNamespace(
+        choices={"horizon_gate": answer}
+    )
+
+    decision = await policy.decide(TaskState(session_id="task", goal="recover"))
+
+    assert decision.action == "pause"
+    assert "uncertain" in decision.reason

@@ -198,6 +198,14 @@ the model—owns budgets, approvals, persistence, and recovery.
 
 The default watchdog pauses after three consecutive failed actions. It is consulted after failures and periodically, not after every successful tool call. Jev is an optional, narrow `continue` or `pause for review` signal. If Jev cannot be imported or called, the deterministic policy takes over. Jev does not generate code or replace the main model.
 
+Install the optional decision client with `uv sync --extra decision`. A local
+Jev-compatible judge such as Kev can be selected with
+`AETHERIS_DECISION_POLICY=jev`, `AETHERIS_DECISION_BASE_URL=http://127.0.0.1:8009`,
+and `AETHERIS_DECISION_MODEL=kev-latest`. The runtime fails closed: it only
+continues when the judge explicitly selects `continue` above the confidence
+threshold; uncertainty becomes a human-review pause. Deterministic approval
+gates and runtime budgets remain authoritative.
+
 `write_file`, `edit_file`, and shell execution require an interactive approval. Approval is a user decision gate; it is not an OS sandbox. Shell commands run with the current process user's permissions. The repository does not claim protection against malicious commands. Use a disposable container or a separate OS account for untrusted repositories.
 
 ## Offline evaluation
