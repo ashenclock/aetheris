@@ -1,0 +1,49 @@
+services:
+  aetheris-api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.api
+    environment:
+      AETHERIS_API_TOKEN: ${AETHERIS_API_TOKEN:?Set AETHERIS_API_TOKEN in .env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --workspace
+      - /workspace
+      - --db
+      - /state/aetheris.sqlite3
+      - --model
+      - ${AETHERIS_MODEL:-openai/gpt-4o-mini}
+      - --read-only
+    volumes:
+      - ${AETHERIS_WORKSPACE:-../../}:/workspace:ro
+      - aetheris_state:/state
+    networks:
+      - agent_internal
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_SECURE_COOKIE: "false"
+      AETHERIS_API_TOKEN: ${AETHERIS_API_TOKEN:?Set AETHERIS_API_TOKEN in .env}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - agent_internal
+    depends_on:
+      - aetheris-api
+
+volumes:
+  aetheris_state:
+  n8n_data:
+
+networks:
+  agent_internal:
+    internal: true

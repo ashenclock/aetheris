@@ -1,0 +1,18 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/aetheris
+COPY pyproject.toml poetry.lock README.md LICENSE requirements.txt ./
+COPY nexus ./nexus
+COPY evals ./evals
+COPY streamlit_app.py ./streamlit_app.py
+
+RUN pip install --no-cache-dir -r requirements.txt \
+    && useradd --create-home --shell /usr/sbin/nologin aetheris
+
+USER aetheris
+EXPOSE 8501
+
+CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]

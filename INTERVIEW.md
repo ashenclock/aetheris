@@ -305,3 +305,102 @@ migrations, integrity checks, and recovery procedures.
 I would keep the current explicit state, memory, policy, and skill boundaries.
 I would avoid adding distributed orchestration or semantic memory until a
 measured requirement justifies it.
+
+## Full repository walkthrough
+
+Show the worktree before opening the core loop:
+
+```text
+pyproject.toml / poetry.lock  package and reproducible dependency metadata
+nexus/                         installable runtime package
+  cli.py                       terminal entry points
+  core/                        loop, state, SQLite memory, policy, prompts
+  skills/                      explicit tools and approval boundaries
+  web/                         bounded public-GitHub archive connector
+evals/                         deterministic scripted-model scenarios
+tests/                         focused runtime and protocol tests
+streamlit_app.py              read-only hosted demo
+Dockerfile                    portable CLI image
+Dockerfile.streamlit          portable web image
+README.md / INTERVIEW.md      user and interview documentation
+```
+
+The separation is intentional: `core` controls state and policy, `skills`
+contain side effects, `evals` exercise the real runtime, and `web` is only an
+adapter. The Streamlit surface uses the same `Agent`, not a second fake loop.
+
+## Portable and hosted demo
+
+The local distribution is intentionally small:
+
+```bash
+python -m pip install -e ".[web]"
+streamlit run streamlit_app.py
+docker build -f Dockerfile.streamlit -t aetheris-web:local .
+```
+
+The hosted demo downloads a bounded public GitHub archive, uses an isolated
+temporary workspace, and exposes only read-only tools. It demonstrates the
+runtime and protocol without pretending to sandbox arbitrary shell execution.
+For Community Cloud, `requirements.txt` and `streamlit_app.py` are at the
+repository root and credentials belong in platform secrets.
+
+I chose a direct GitHub connector for the interview demo instead of making MCP
+a hard dependency. The official MCP Python SDK supports stdio and HTTP
+transports, so an MCP adapter is a reasonable next step for authenticated
+remote tools; a local stdio server in a public Streamlit app would add process
+lifecycle and credential complexity before this project has measured a need.
+
+## ReAct, sub-agents, and knowledge
+
+ReAct is a paradigm for interleaving a model's next-action reasoning with tool
+calls and observations. It is useful here because the control loop is explicit;
+it is not itself a reliability guarantee. Aetheris adds the missing runtime
+control: budgets, approval, persistence, protocol IDs, checkpoints, and pause
+conditions.
+
+The `delegate_task` skill is a deliberately small sub-agent path. The parent
+can delegate one bounded read-only research question; the child has its own
+session/checkpoints, cannot delegate again, cannot edit files, and returns a
+report with evidence and unresolved risks. This helps decompose a long task,
+but it also introduces cost, latency, duplicate context, and aggregation risk.
+The honest production question is not “how many agents can I spawn?” but “what
+independent work justifies another bounded context?”
+
+The Markdown wiki is an LLM-assisted knowledge base: the model proposes a
+fact, source, and optional `[[page-topic]]` links; SQLite remains the execution
+record. `aetheris wiki --graph` gives a lightweight Obsidian-like view. The
+current lexical retrieval is appropriate for a small repository. I would add
+embedding RAG only after measuring semantic misses or corpus growth, and would
+keep provenance, freshness, and human review even after adding embeddings.
+
+## API, n8n, and transcription
+
+`aetheris serve` is a small authenticated HTTP adapter for webhooks and n8n.
+The default mode is read-only and the Docker Compose example puts n8n and the
+adapter on an internal network, keeps API state on a separate volume, and
+mounts the workspace read-only. n8n owns triggers and external integrations;
+Aetheris owns the agent loop and runtime state. This is simpler to defend than
+embedding an orchestration engine inside the core.
+
+The transcription command uses a hosted Audio API when explicitly configured;
+it is optional, bounded to the documented file size, and never takes the API
+key as a CLI argument. Audio privacy and consent are part of the design, not a
+footnote.
+
+For Codex-compatible API models, the runtime has an explicit Responses adapter
+selected with `responses/<model-id>`. It normalizes Responses function calls
+into the same internal tool-call/result protocol. This path is tested with a
+fake Responses client but not with a live request on this machine because no
+OpenAI API key is configured. That distinction is important: adapter coverage
+is not model-quality evidence.
+
+## Failure cases to show
+
+Use the deterministic evaluator to show one transient tool failure, an
+approval pause, a process interruption with pending tool-call recovery, and
+the max-step boundary. Then show `aetheris status` and `aetheris wiki --graph`.
+For the n8n path, show an invalid bearer token and a read-only task. Explain
+that model errors pause, malformed responses pause, SQLite corruption is not
+magically repaired, and an interrupted side effect is ambiguous rather than
+exactly-once.

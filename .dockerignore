@@ -1,0 +1,13 @@
+.git
+.github
+.aetheris
+.venv
+__pycache__
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache
+.ruff_cache
+tests
+poetry.lock.bak

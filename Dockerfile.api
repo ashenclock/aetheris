@@ -1,0 +1,19 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/aetheris
+COPY pyproject.toml poetry.lock README.md LICENSE ./
+COPY nexus ./nexus
+COPY evals ./evals
+
+RUN pip install --no-cache-dir ".[transcription]" \
+    && useradd --create-home --shell /usr/sbin/nologin aetheris \
+    && mkdir -p /state /workspace \
+    && chown -R aetheris:aetheris /state /workspace
+
+USER aetheris
+EXPOSE 8787
+ENTRYPOINT ["aetheris"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8787", "--workspace", "/workspace", "--db", "/state/aetheris.sqlite3", "--read-only"]
