@@ -56,6 +56,10 @@ aetheris --help
 The editable install is useful for development. `uv tool install .` is the
 smallest npm-like workflow for a standalone local command.
 
+For hands-on experiments that create a web project, inspect SQLite checkpoints,
+resume a paused task, or build a local MLflow pipeline, see
+[`GUIDE.md`](GUIDE.md).
+
 The same command can be written as:
 
 ```bash
