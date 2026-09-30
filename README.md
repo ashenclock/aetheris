@@ -67,6 +67,18 @@ python evals/run.py
 python -m pytest -q
 ```
 
+For a short deterministic interview demo, run:
+
+```bash
+python evals/demo.py
+```
+
+The focused runner can execute one scenario without API keys:
+
+```bash
+python evals/run.py --task resume-interrupted-call
+```
+
 The runner uses a scripted local model and a test-only tool that fails once. It makes no API calls. It reports task success, steps, tool calls and failures, recovery, prompt/completion tokens, estimated cost when available, latency, review pauses, and checkpoint counts. Token usage is fixed by the mock responses; cost is intentionally `null`, and latency is machine-dependent. These checks demonstrate runtime behavior, not model quality or a benchmark score.
 
 ## Design choices
@@ -99,6 +111,7 @@ tests/                   # Runtime, protocol, persistence, and policy tests
 - Approval does not isolate files, processes, or network access. There is no container sandbox.
 - Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.
 - A long run still depends on the model's ability to choose useful actions. Checkpoints preserve progress; they do not guarantee completion.
+- A malformed model response pauses the task with a checkpoint, but recovery still depends on a later valid response.
 
 ## License
 
