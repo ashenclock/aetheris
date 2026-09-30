@@ -1,5 +1,5 @@
-import os
 from pydantic import BaseModel, Field
+
 from .base_skill import BaseSkill
 
 
@@ -42,21 +42,19 @@ class EditFileSkill(BaseSkill):
             return f"Error: file '{raw_filepath}' is outside the workspace."
 
         try:
-            if not os.path.exists(filepath):
+            if not filepath.exists():
                 return f"Error: The file '{filepath}' does not exist."
 
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = filepath.read_text(encoding="utf-8")
 
             if target not in content:
                 return "Error: target_content not found exactly as provided in the file. Watch out for whitespace and indentation."
 
-            # Replace only the first occurrence to avoid unintended changes
-            new_content = content.replace(target, replacement, 1)
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(new_content)
+            # Replace only the first occurrence to avoid unintended changes.
+            filepath.write_text(
+                content.replace(target, replacement, 1), encoding="utf-8"
+            )
 
             return f"Successfully edited '{filepath}'."
-        except Exception as e:
-            return f"Error editing file: {str(e)}"
+        except OSError as exc:
+            return f"Error editing file: {exc}"

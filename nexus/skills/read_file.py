@@ -1,5 +1,5 @@
-import os
 from pydantic import BaseModel, Field
+
 from .base_skill import BaseSkill
 
 
@@ -31,13 +31,10 @@ class ReadFileSkill(BaseSkill):
             return f"Error: file '{raw_filepath}' is outside the workspace."
 
         try:
-            if not os.path.exists(filepath):
+            if not filepath.exists():
                 return f"Error: The file '{filepath}' does not exist."
-            if not os.path.isfile(filepath):
+            if not filepath.is_file():
                 return f"Error: '{filepath}' is not a valid file."
-
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            return content
-        except Exception as e:
-            return f"Error reading file '{filepath}': {str(e)}"
+            return filepath.read_text(encoding="utf-8")
+        except OSError as exc:
+            return f"Error reading file '{filepath}': {exc}"

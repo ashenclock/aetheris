@@ -1,5 +1,5 @@
-import os
 from pydantic import BaseModel, Field
+
 from .base_skill import BaseSkill
 
 
@@ -38,12 +38,8 @@ class WriteFileSkill(BaseSkill):
             return f"Error: file '{raw_filepath}' is outside the workspace."
 
         try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content)
-
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} characters to '{filepath}'."
-        except Exception as e:
-            return f"Error writing file: {str(e)}"
+        except OSError as exc:
+            return f"Error writing file: {exc}"
