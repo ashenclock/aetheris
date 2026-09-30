@@ -35,6 +35,74 @@ async def test_agent_initialization_persists_system_prompt(temp_db):
 
 
 @pytest.mark.asyncio
+async def test_responses_adapter_normalizes_function_call(monkeypatch, tmp_path):
+    class FakeResponses:
+        async def create(self, **kwargs):
+            assert kwargs["model"] == "codex-mini-latest"
+            assert kwargs["tools"][0]["type"] == "function"
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        call_id="codex-call-1",
+                        name="read_file",
+                        arguments='{"filepath":"README.md"}',
+                    )
+                ],
+                output_text="",
+                usage=SimpleNamespace(input_tokens=7, output_tokens=3),
+            )
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = FakeResponses()
+
+        async def close(self):
+            return None
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "openai",
+        SimpleNamespace(AsyncOpenAI=FakeClient),
+    )
+    agent = Agent(
+        model_name="responses/codex-mini-latest",
+        workspace_root=tmp_path,
+        enabled_skill_names={"read_file"},
+    )
+    result = await agent._request_model(
+        [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "inspect"},
+        ]
+    )
+    assert result.choices[0].message.tool_calls[0].id == "codex-call-1"
+    assert result.usage.prompt_tokens == 7
+
+
+def test_agent_can_expose_a_bounded_read_only_tool_set(tmp_path):
+    agent = Agent(
+        model_name="mock/offline",
+        workspace_root=tmp_path,
+        enabled_skill_names={"read_file", "search_code"},
+    )
+    assert set(agent.skills) == {"read_file", "search_code"}
+    assert all(skill.workspace_root == tmp_path.resolve() for skill in agent.skills.values())
+
+
+def test_codex_model_selects_responses_api_adapter(tmp_path):
+    agent = Agent(
+        model_name="responses/codex-mini-latest",
+        workspace_root=tmp_path,
+        enabled_skill_names={"read_file"},
+    )
+    assert agent._uses_responses_api()
+    tools = agent._responses_tools()
+    assert tools[0]["type"] == "function"
+    assert "function" not in tools[0]
+
+
+@pytest.mark.asyncio
 async def test_agent_completes_and_persists_usage(temp_db):
     agent = Agent(model_name="mock/offline", db_path=temp_db)
     await agent.init()

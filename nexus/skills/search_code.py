@@ -34,7 +34,7 @@ class SearchCodeSkill(BaseSkill):
             return "Error: pattern cannot be empty."
 
         results = []
-        root = Path(".")
+        root = self.workspace_root or Path.cwd()
 
         for file_path in root.rglob("*"):
             if file_path.is_dir():

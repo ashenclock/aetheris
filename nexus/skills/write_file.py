@@ -28,11 +28,14 @@ class WriteFileSkill(BaseSkill):
         return True
 
     async def execute(self, **kwargs) -> str:
-        filepath = kwargs.get("filepath", "")
+        raw_filepath = kwargs.get("filepath", "")
         content = kwargs.get("content", "")
 
-        if not filepath:
+        filepath = self.resolve_path(raw_filepath)
+        if not raw_filepath:
             return "Error: filepath cannot be empty."
+        if filepath is None:
+            return f"Error: file '{raw_filepath}' is outside the workspace."
 
         try:
             # Ensure directory exists

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import importlib
-import inspect
 import json
 import logging
 import os
-import pkgutil
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 # Use LiteLLM's packaged price map so importing the agent does not fetch pricing over the network.
@@ -13,6 +12,15 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 from litellm import acompletion
 
 from nexus.skills.base_skill import BaseSkill
+from nexus.skills.delegate_task import DelegateTaskSkill
+from nexus.skills.edit_file import EditFileSkill
+from nexus.skills.list_dir import ListDirSkill
+from nexus.skills.read_file import ReadFileSkill
+from nexus.skills.recall import RecallSkill
+from nexus.skills.remember import RememberSkill
+from nexus.skills.run_command import RunCommandSkill
+from nexus.skills.search_code import SearchCodeSkill
+from nexus.skills.write_file import WriteFileSkill
 
 from .knowledge import KnowledgeStore
 from .memory import SessionMemory
@@ -21,6 +29,18 @@ from .state import TaskState, TaskStatus
 from .tracker import CostTracker
 
 logger = logging.getLogger("AetherisAgent")
+
+SKILL_TYPES = (
+    EditFileSkill,
+    DelegateTaskSkill,
+    ListDirSkill,
+    ReadFileSkill,
+    RecallSkill,
+    RememberSkill,
+    RunCommandSkill,
+    SearchCodeSkill,
+    WriteFileSkill,
+)
 
 
 class Agent:
@@ -32,6 +52,8 @@ class Agent:
         max_steps: int = 40,
         cost_budget_usd: float = 1.0,
         policy: DecisionPolicy | None = None,
+        workspace_root: str | Path | None = None,
+        enabled_skill_names: set[str] | None = None,
     ):
         self.model_name = model_name
         self.session_id = session_id
@@ -40,9 +62,26 @@ class Agent:
         self.memory = SessionMemory(db_path=db_path, session_id=session_id)
         self.tracker = CostTracker()
         self.policy = policy or build_policy()
+        self.workspace_root = (
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
+        self.enabled_skill_names = enabled_skill_names
         self.skills = self._load_skills()
-        self.knowledge = KnowledgeStore()
+        knowledge_root = (
+            self.workspace_root / ".aetheris/wiki"
+            if self.workspace_root
+            else ".aetheris/wiki"
+        )
+        self.knowledge = KnowledgeStore(knowledge_root)
         self.system_prompt = self._load_system_prompt()
+        if enabled_skill_names is not None:
+            self.system_prompt += (
+                "\n\nDeployment mode: the available tools are intentionally limited. "
+                "Do not claim to edit, execute, or persist changes unless an available "
+                "tool actually did so."
+            )
 
     def _load_system_prompt(self) -> str:
         path = os.path.join(os.path.dirname(__file__), "prompts", "mega_prompt.md")
@@ -53,22 +92,23 @@ class Agent:
             return "You are Aetheris, a careful software engineering agent."
 
     def _load_skills(self) -> dict[str, BaseSkill]:
-
         skills: dict[str, BaseSkill] = {}
-        package_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "skills")
-        )
-        for _, module_name, _ in pkgutil.iter_modules([package_path]):
-            if module_name == "base_skill":
-                continue
-            try:
-                module = importlib.import_module(f"nexus.skills.{module_name}")
-                for _, obj in inspect.getmembers(module, inspect.isclass):
-                    if issubclass(obj, BaseSkill) and obj is not BaseSkill:
-                        skill = obj()
-                        skills[skill.name] = skill
-            except Exception as exc:
-                logger.warning("Could not load skill %s: %s", module_name, exc)
+        for skill_type in SKILL_TYPES:
+            if skill_type is DelegateTaskSkill:
+                skill = skill_type(
+                    workspace_root=self.workspace_root,
+                    model_name=self.model_name,
+                    db_path=self.memory.db_path,
+                    parent_session=self.session_id,
+                    cost_budget_usd=self.cost_budget_usd,
+                )
+            else:
+                skill = skill_type(workspace_root=self.workspace_root)
+            if (
+                self.enabled_skill_names is None
+                or skill.name in self.enabled_skill_names
+            ):
+                skills[skill.name] = skill
         return skills
 
     def _tool_schemas(self) -> list[dict[str, Any]] | None:
@@ -123,11 +163,7 @@ class Agent:
                 history.insert(0, {"role": "system", "content": runtime_context})
 
             try:
-                response = await acompletion(
-                    model=self.model_name,
-                    messages=history,
-                    tools=self._tool_schemas(),
-                )
+                response = await self._request_model(history)
             except Exception as exc:
                 state.record_step(
                     "model_request", success=False, error=str(exc), is_tool_call=False
@@ -136,7 +172,7 @@ class Agent:
                 await self.memory.checkpoint(
                     state, "Model request failed; task can be resumed."
                 )
-                logger.exception("Model request failed")
+                logger.warning("Model request failed: %s", exc)
                 return f"Task paused after a model request error: {exc}"
 
             state.record_usage(self.tracker.add_usage(response))
@@ -211,6 +247,109 @@ class Agent:
                 "Decision policy failed; applying deterministic policy: %s", exc
             )
             return await HeuristicPolicy().decide(state)
+
+    async def _request_model(self, history: list[dict[str, Any]]) -> Any:
+        if not self._uses_responses_api():
+            return await acompletion(
+                model=self.model_name,
+                messages=history,
+                tools=self._tool_schemas(),
+            )
+        return await self._request_responses_api(history)
+
+    def _uses_responses_api(self) -> bool:
+        return self.model_name.startswith("responses/")
+
+    async def _request_responses_api(self, history: list[dict[str, Any]]) -> Any:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "The Responses API adapter requires the optional OpenAI SDK. "
+                "Install with: pip install -e '.[transcription]'"
+            ) from exc
+
+        system = ""
+        input_items: list[dict[str, Any]] = []
+        for message in history:
+            role = message.get("role")
+            if role == "system":
+                system = message.get("content") or ""
+                continue
+            if role == "assistant" and message.get("tool_calls"):
+                for call in message["tool_calls"]:
+                    function = call.get("function", {})
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call.get("id"),
+                            "name": function.get("name", ""),
+                            "arguments": function.get("arguments", "{}"),
+                        }
+                    )
+                continue
+            if role == "tool":
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.get("tool_call_id"),
+                        "output": message.get("content") or "",
+                    }
+                )
+                continue
+            input_items.append({"role": role, "content": message.get("content") or ""})
+
+        client = AsyncOpenAI()
+        try:
+            response = await client.responses.create(
+                model=self.model_name.removeprefix("responses/"),
+                instructions=system,
+                input=input_items,
+                tools=self._responses_tools(),
+            )
+        finally:
+            await client.close()
+
+        calls = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            calls.append(
+                SimpleNamespace(
+                    id=getattr(item, "call_id", None) or getattr(item, "id", ""),
+                    function=SimpleNamespace(
+                        name=getattr(item, "name", ""),
+                        arguments=getattr(item, "arguments", "{}"),
+                    ),
+                )
+            )
+        usage = getattr(response, "usage", None)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=getattr(response, "output_text", "") or "",
+                        tool_calls=calls or None,
+                    )
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+                completion_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            ),
+        )
+
+    def _responses_tools(self) -> list[dict[str, Any]]:
+        tools = self._tool_schemas() or []
+        return [
+            {
+                "type": "function",
+                "name": tool["function"]["name"],
+                "description": tool["function"]["description"],
+                "parameters": tool["function"]["parameters"],
+            }
+            for tool in tools
+        ]
 
     async def _execute_tool_call(
         self, tool_call: dict[str, Any], state: TaskState

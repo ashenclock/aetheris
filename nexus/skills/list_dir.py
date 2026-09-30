@@ -24,9 +24,10 @@ class ListDirSkill(BaseSkill):
         return ListDirSchema
 
     async def execute(self, **kwargs) -> str:
-        path = kwargs.get("path", ".")
-        if not path:
-            path = "."
+        raw_path = kwargs.get("path", ".") or "."
+        path = self.resolve_path(raw_path)
+        if path is None:
+            return f"Error: path '{raw_path}' is outside the workspace."
 
         try:
             if not os.path.exists(path):

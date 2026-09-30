@@ -31,12 +31,15 @@ class EditFileSkill(BaseSkill):
         return True
 
     async def execute(self, **kwargs) -> str:
-        filepath = kwargs.get("filepath", "")
+        raw_filepath = kwargs.get("filepath", "")
         target = kwargs.get("target_content", "")
         replacement = kwargs.get("replacement_content", "")
 
-        if not filepath or not target:
+        filepath = self.resolve_path(raw_filepath)
+        if not raw_filepath or not target:
             return "Error: filepath and target_content cannot be empty."
+        if filepath is None:
+            return f"Error: file '{raw_filepath}' is outside the workspace."
 
         try:
             if not os.path.exists(filepath):

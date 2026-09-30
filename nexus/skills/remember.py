@@ -10,6 +10,10 @@ class RememberSchema(BaseModel):
     content: str = Field(
         ..., description="Concise knowledge worth preserving across sessions"
     )
+    source: str | None = Field(
+        None,
+        description="Optional evidence such as a file path, command, or decision reference",
+    )
 
 
 class RememberSkill(BaseSkill):
@@ -26,5 +30,8 @@ class RememberSkill(BaseSkill):
         return RememberSchema
 
     async def execute(self, **kwargs) -> str:
-        path = KnowledgeStore().remember(kwargs["topic"], kwargs["content"])
+        root = self.workspace_root / ".aetheris/wiki" if self.workspace_root else ".aetheris/wiki"
+        path = KnowledgeStore(root).remember(
+            kwargs["topic"], kwargs["content"], kwargs.get("source")
+        )
         return f"Stored durable knowledge in {path}."

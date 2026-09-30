@@ -23,6 +23,18 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 packages = [{ include = "nexus" }]
 
+[project.scripts]
+aetheris = "nexus.cli:app"
+
+[project.optional-dependencies]
+web = [
+    "streamlit (>=1.45.0,<2.0.0)",
+    "openai (>=1.0.0,<3.0.0)"
+]
+transcription = [
+    "openai (>=1.0.0,<3.0.0)"
+]
+
 [dependency-groups]
 dev = [
     "pytest (>=9.1.1,<10.0.0)",

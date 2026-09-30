@@ -43,6 +43,7 @@ class RunCommandSkill(BaseSkill):
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.workspace_root) if self.workspace_root else None,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(

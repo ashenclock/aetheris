@@ -12,3 +12,15 @@ def test_markdown_knowledge_roundtrip(tmp_path):
     assert "durable task state" in matches[0][1]
     context = store.context("SQLite resumable state")
     assert "Architecture decision" in context
+
+
+def test_knowledge_store_renders_linked_pages(tmp_path):
+    store = KnowledgeStore(tmp_path / "wiki")
+    store.remember("Architecture", "Use [[testing]] for regression checks.", "README.md")
+    store.remember("Testing", "Run pytest.")
+
+    graph = store.graph_dot()
+    assert '"architecture" -> "testing"' in graph
+    assert "Source: `README.md`" in (
+        tmp_path / "wiki" / "architecture.md"
+    ).read_text()
