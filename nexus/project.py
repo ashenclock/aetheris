@@ -86,4 +86,19 @@ def load_mcp_config(workspace: str | Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("mcpServers", {}), dict):
         raise ValueError(f"Invalid MCP configuration: {path}")
+    for name, server in value.get("mcpServers", {}).items():
+        if not isinstance(server, dict):
+            raise ValueError(f"MCP server '{name}' must be a JSON object.")
+        if not isinstance(server.get("command"), str) or not server["command"].strip():
+            raise ValueError(f"MCP server '{name}' needs a non-empty command.")
+        for field in ("args", "env"):
+            entries = server.get(field, [])
+            if not isinstance(entries, list) or not all(
+                isinstance(entry, str) for entry in entries
+            ):
+                raise ValueError(
+                    f"MCP server '{name}' field '{field}' must be a string list."
+                )
+        if not isinstance(server.get("enabled", True), bool):
+            raise ValueError(f"MCP server '{name}' field 'enabled' must be boolean.")
     return value

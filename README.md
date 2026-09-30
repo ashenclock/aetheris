@@ -387,7 +387,8 @@ why multiple replicas require shared state first.
 - A malformed or empty model response pauses the task with a checkpoint, but recovery still depends on a later valid response.
 - MCP support currently targets local stdio servers and JSONL messages. It does
   not provide remote transport, server isolation, or permission grants based on
-  MCP metadata.
+  MCP metadata. POSIX cleanup terminates the server's process group; on Windows
+  cleanup currently targets the direct server process only.
 - Project agent profiles and skills guide the model but are not a second policy
   engine. Runtime checks and approvals remain authoritative.
 - The hosted Streamlit page has no built-in authentication or aggregate spend

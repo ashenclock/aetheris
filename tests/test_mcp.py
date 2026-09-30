@@ -1,4 +1,7 @@
+import os
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
@@ -6,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from nexus.core.agent import Agent
-from nexus.mcp import MCPClient, configured_servers, discover_tools
+from nexus.mcp import (
+    MCPClient,
+    MCPConnectionError,
+    MCPServer,
+    configured_servers,
+    discover_tools,
+)
 from nexus.project import add_mcp_server
 
 
@@ -71,3 +80,57 @@ async def test_mcp_tool_is_approval_gated(tmp_path):
         or "not approved" in history[-1]["content"]
     )
     await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+async def test_mcp_timeout_terminates_server_descendants(tmp_path):
+    script = tmp_path / "mcp_hangs.py"
+    pid_file = tmp_path / "child.pid"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    client = MCPClient(
+        MCPServer("hanging", sys.executable, (str(script),), ()),
+        str(tmp_path),
+        timeout=0.2,
+    )
+
+    with pytest.raises(TimeoutError):
+        await client.list_tools()
+
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if not state or state.startswith("Z"):
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"MCP child process {child_pid} survived cleanup")
+
+
+@pytest.mark.asyncio
+async def test_mcp_rejects_valid_json_with_wrong_protocol_shape(tmp_path):
+    script = tmp_path / "mcp_malformed.py"
+    script.write_text("import sys\nfor _ in sys.stdin: print('[]', flush=True)\n")
+    client = MCPClient(
+        MCPServer("malformed", sys.executable, (str(script),), ()), str(tmp_path)
+    )
+
+    with pytest.raises(MCPConnectionError, match="non-object message"):
+        await client.list_tools()

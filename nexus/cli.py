@@ -612,12 +612,10 @@ def validate_mcp_command(
     workspace: str = typer.Option(".", "--workspace", "-w"),
 ) -> None:
     """Validate MCP JSON and command metadata without launching servers."""
-    config = load_mcp_config(workspace)
-    for name, server in config.get("mcpServers", {}).items():
-        if not server.get("command"):
-            raise typer.BadParameter(f"MCP server '{name}' has no command")
-        if not isinstance(server.get("args", []), list):
-            raise typer.BadParameter(f"MCP server '{name}' args must be a list")
+    try:
+        config = load_mcp_config(workspace)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
     console.print(
         f"[green]Valid MCP configuration:[/green] {len(config.get('mcpServers', {}))} server(s)"
     )

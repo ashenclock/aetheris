@@ -15,6 +15,7 @@ from .core.agent import Agent
 from .core.memory import SessionBusyError, SessionMemory
 
 logger = logging.getLogger(__name__)
+REQUEST_READ_TIMEOUT_SECONDS = 10
 
 
 class AetherisAPIError(RuntimeError):
@@ -23,6 +24,10 @@ class AetherisAPIError(RuntimeError):
 
 class AetherisRequestHandler(BaseHTTPRequestHandler):
     server_version = "Aetheris/0.2"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"aetheris-api: {format % args}")
@@ -47,6 +52,8 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict[str, Any]:
+        if self.headers.get("Transfer-Encoding"):
+            raise AetherisAPIError("Transfer-Encoding is not supported.")
         try:
             size = int(self.headers.get("Content-Length", "0"))
             if size <= 0 or size > 64 * 1024:
@@ -84,9 +91,16 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_json()
-            result = _run(self.runtime.run_task(body))
         except AetherisAPIError as exc:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        except TimeoutError:
+            self._write_json(
+                HTTPStatus.REQUEST_TIMEOUT, {"error": "Request body timed out."}
+            )
+            return
+        try:
+            result = _run(self.runtime.run_task(body))
         except SessionBusyError as exc:
             self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
         except Exception as exc:

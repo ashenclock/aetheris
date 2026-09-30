@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,12 +72,26 @@ class MCPClient:
                     f"MCP server '{self.server.name}' closed stdout"
                 )
             message = json.loads(raw)
+            if not isinstance(message, dict):
+                raise MCPConnectionError(
+                    f"MCP server '{self.server.name}' returned a non-object message"
+                )
             if message.get("id") == self._next_id:
                 if "error" in message:
                     raise MCPConnectionError(str(message["error"]))
-                return message.get("result", {})
+                result = message.get("result", {})
+                if not isinstance(result, dict):
+                    raise MCPConnectionError(
+                        f"MCP server '{self.server.name}' returned a non-object result"
+                    )
+                return result
 
     async def _start(self):
+        process_options = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 self.server.command,
@@ -85,6 +101,8 @@ class MCPClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                limit=1024 * 1024,
+                **process_options,
             )
         except OSError as exc:
             raise MCPConnectionError(str(exc)) from exc
@@ -103,10 +121,39 @@ class MCPClient:
             )
             await process.stdin.drain()
             return process
-        except Exception:
-            process.terminate()
-            await process.wait()
+        except BaseException:
+            await self._stop(process)
             raise
+
+    async def _stop(self, process) -> None:
+        """Stop the MCP process and its POSIX descendants after one call."""
+        if os.name == "nt":
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.5)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+            return
+
+        # The group may outlive an already-exited parent process.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+        # The parent can exit on SIGTERM while a child ignores it.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.returncode is None:
+            await process.wait()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         process = await self._start()
@@ -114,8 +161,7 @@ class MCPClient:
             result = await self._request(process, "tools/list")
             return list(result.get("tools", []))
         finally:
-            process.terminate()
-            await process.wait()
+            await self._stop(process)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         process = await self._start()
@@ -127,8 +173,7 @@ class MCPClient:
             text = "\n".join(chunk for chunk in chunks if chunk)
             return f"Error: {text}" if result.get("isError") else text
         finally:
-            process.terminate()
-            await process.wait()
+            await self._stop(process)
 
 
 async def discover_tools(workspace: str) -> list[tuple[MCPServer, dict[str, Any]]]:
