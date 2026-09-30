@@ -167,6 +167,30 @@ async def run_task(task: dict) -> dict:
                 elapsed_ms = (time.perf_counter() - started) * 1_000
                 state = await agent.memory.load_state()
                 assert state is not None
+                history = await agent.memory.get_history()
+                tool_output = "\n".join(
+                    message.get("content", "")
+                    for message in history
+                    if message.get("role") == "tool"
+                )
+                artifact_checks = {
+                    relative_path: (
+                        (root / relative_path).is_file()
+                        and expected
+                        in (root / relative_path).read_text(encoding="utf-8")
+                    )
+                    for relative_path, expected in task.get(
+                        "expected_files", {}
+                    ).items()
+                }
+                output_checks = {
+                    expected: expected in tool_output
+                    for expected in task.get("expected_tool_output", [])
+                }
+                absent_checks = {
+                    relative_path: not (root / relative_path).exists()
+                    for relative_path in task.get("absent_files", [])
+                }
 
                 checks = {
                     "status": state.status.value == task["expected_status"],
@@ -181,11 +205,17 @@ async def run_task(task: dict) -> dict:
                     == task.get(
                         "expected_human_review_pauses", state.human_review_pauses
                     ),
+                    "expected_files": all(artifact_checks.values()),
+                    "expected_tool_output": all(output_checks.values()),
+                    "absent_files": all(absent_checks.values()),
                 }
                 return {
                     "id": task["id"],
                     "success": all(checks.values()),
                     "checks": checks,
+                    "artifact_checks": artifact_checks,
+                    "tool_output_checks": output_checks,
+                    "absent_file_checks": absent_checks,
                     "status": state.status.value,
                     "steps": state.step_count,
                     "tool_calls": state.tool_calls,

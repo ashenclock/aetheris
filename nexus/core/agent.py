@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from typing import Any
 # Use LiteLLM's packaged price map so importing the agent does not fetch pricing over the network.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 from litellm import acompletion
+from pydantic import ValidationError
 
 from nexus.skills.base_skill import BaseSkill
 from nexus.skills.delegate_task import DelegateTaskSkill
@@ -25,6 +27,7 @@ from nexus.skills.use_skill import UseSkillSkill
 from nexus.skills.web_search import WebSearchSkill
 from nexus.skills.mcp_tool import MCPToolSkill
 from nexus.mcp import MCPConnectionError, discover_tools
+from nexus.project import validate_name
 
 from .knowledge import KnowledgeStore
 from .delegation import DelegationBudget
@@ -107,14 +110,14 @@ class Agent:
         if mode not in {"execute", "plan"}:
             raise ValueError("mode must be 'execute' or 'plan'")
         self.mode = mode
-        self.agent_profile = agent_profile
+        self.agent_profile = validate_name(agent_profile) if agent_profile else None
         self.skills = self._load_skills()
         knowledge_root = (
             self.workspace_root / ".aetheris/wiki"
             if self.workspace_root
             else ".aetheris/wiki"
         )
-        self.knowledge = KnowledgeStore(knowledge_root)
+        self.knowledge = KnowledgeStore(knowledge_root, self.workspace_root)
         self.system_prompt = self._load_system_prompt()
         if enabled_skill_names is not None:
             self.system_prompt += (
@@ -138,12 +141,21 @@ class Agent:
                 "and an explicit approval checkpoint before execution."
             )
         if self.agent_profile and self.workspace_root:
-            profile = (
-                self.workspace_root
-                / ".aetheris"
-                / "agents"
-                / f"{self.agent_profile}.md"
-            )
+            agents_root = self.workspace_root / ".aetheris" / "agents"
+            resolved_root = agents_root.resolve()
+            try:
+                resolved_root.relative_to(self.workspace_root)
+            except ValueError as exc:
+                raise ValueError(
+                    "Agent profile directory escapes the workspace."
+                ) from exc
+            profile = agents_root / f"{self.agent_profile}.md"
+            try:
+                profile.resolve().relative_to(resolved_root)
+            except ValueError as exc:
+                raise ValueError(
+                    "Agent profile file escapes its profile directory."
+                ) from exc
             if profile.is_file():
                 prompt += (
                     "\n\nPROJECT AGENT PROFILE (user configuration, not a policy override):\n"
@@ -239,9 +251,9 @@ class Agent:
         await self.policy.close()
 
     async def chat(self, user_input: str) -> str:
-        await self.memory.add_message("user", user_input)
         state = await self._ensure_state(user_input)
         await self.memory.recover_pending_tool_calls(state)
+        await self.memory.add_message("user", user_input)
 
         while True:
             if state.should_pause():
@@ -274,6 +286,12 @@ class Agent:
 
             try:
                 response = await self._request_model(history)
+            except asyncio.CancelledError:
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(
+                    state, "Task canceled while waiting for a model response."
+                )
+                raise
             except Exception as exc:
                 state.record_step(
                     "model_request", success=False, error=str(exc), is_tool_call=False
@@ -328,7 +346,37 @@ class Agent:
                         tool_calls[index:], state, "Execution budget reached."
                     )
 
-                await self._execute_tool_call(tool_call, state)
+                try:
+                    approval_denied = await self._execute_tool_call(tool_call, state)
+                except asyncio.CancelledError:
+                    state.status = TaskStatus.PAUSED
+                    await self.memory.checkpoint(
+                        state,
+                        "Task canceled during tool execution; pending call will be recovered.",
+                    )
+                    raise
+
+                if approval_denied:
+                    state.status = TaskStatus.PAUSED
+                    state.human_review_pauses += 1
+                    remaining = tool_calls[index + 1 :]
+                    results = [
+                        {
+                            "name": call["function"]["name"],
+                            "tool_call_id": call["id"],
+                            "content": "Error: execution paused after approval was denied; this tool call was not executed.",
+                        }
+                        for call in remaining
+                    ]
+                    await self.memory.checkpoint(
+                        state,
+                        "Tool approval denied; remaining calls were not executed.",
+                        tool_results=results,
+                    )
+                    return self._pause_message(
+                        state,
+                        "Tool approval was denied; no further calls were executed.",
+                    )
 
                 if state.consecutive_failures > 0 or state.step_count % 5 == 0:
                     decision = await self._decide(state)
@@ -478,7 +526,7 @@ class Agent:
 
     async def _execute_tool_call(
         self, tool_call: dict[str, Any], state: TaskState
-    ) -> None:
+    ) -> bool:
         # A tool result is persisted with the same call ID as the assistant
         # request, so a crash cannot turn an observation into a fake user turn.
         call_id = tool_call["id"]
@@ -497,17 +545,29 @@ class Agent:
                     {"name": name, "tool_call_id": call_id, "content": result}
                 ],
             )
-            return
+            return False
 
+        approval_denied = False
         skill = self.skills.get(name)
         if skill is None:
             result = f"Error: unknown tool: {name}"
             state.record_step(name, success=False, error=result)
         else:
             try:
-                if skill.requires_confirmation and not await skill.confirm(arguments):
-                    result = "Error: tool execution was not approved."
+                if not isinstance(skill, MCPToolSkill):
+                    arguments = skill.parameters_schema.model_validate(
+                        arguments
+                    ).model_dump()
+                approved = not skill.requires_confirmation
+                if skill.requires_confirmation:
+                    try:
+                        approved = await skill.confirm(arguments)
+                    except Exception:
+                        approved = False
+                if not approved:
+                    result = "Error: tool execution was not approved or approval was unavailable."
                     state.record_step(name, success=False, error=result)
+                    approval_denied = True
                 else:
                     execution_arguments = dict(arguments)
                     if isinstance(skill, DelegateTaskSkill):
@@ -525,6 +585,9 @@ class Agent:
                         success=success,
                         error=None if success else result,
                     )
+            except ValidationError as exc:
+                result = f"Error: invalid arguments for {name}: {exc}"
+                state.record_step(name, success=False, error=result)
             except Exception as exc:
                 result = f"Error: tool execution failed: {exc}"
                 state.record_step(name, success=False, error=result)
@@ -534,6 +597,7 @@ class Agent:
             f"Recorded tool call {call_id}.",
             tool_results=[{"name": name, "tool_call_id": call_id, "content": result}],
         )
+        return approval_denied
 
     async def _pause_before_tool_calls(
         self, tool_calls: list[dict[str, Any]], state: TaskState, reason: str

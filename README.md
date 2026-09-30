@@ -181,6 +181,13 @@ and cannot bypass runtime approvals. `mcp test` performs a real initialize and
 tools/list exchange. Discovered MCP tools remain approval-gated, and plan mode
 does not start MCP servers.
 
+The HTTP adapter is single-tenant and read-only: it has no remote approval
+queue, so its constructor rejects write-enabled mode. Binding beyond loopback
+requires `AETHERIS_API_TOKEN`. Do not expose it directly to the public
+internet; place authentication, TLS, rate limits, and network policy in front
+of it. A completed status means the model returned a final answer, not that
+the requested outcome was independently verified.
+
 For an OpenAI Codex-compatible Responses model, use the explicit adapter
 prefix, for example `AETHERIS_MODEL=responses/codex-mini-latest`. The adapter
 translates the persisted tool-call protocol into Responses function-call items
@@ -242,16 +249,27 @@ continues when the judge explicitly selects `continue` above the confidence
 threshold; uncertainty becomes a human-review pause. Deterministic approval
 gates and runtime budgets remain authoritative.
 
-`write_file`, `edit_file`, and shell execution require an interactive approval. Approval is a user decision gate; it is not an OS sandbox. Shell commands run with the current process user's permissions. The repository does not claim protection against malicious commands. Use a disposable container or a separate OS account for untrusted repositories.
+`write_file`, `edit_file`, and shell execution require an interactive approval. A denied approval pauses the run immediately and closes any later calls in that same model response as not executed. The HTTP API refuses write-enabled mode because it has no remote approval queue. Approval is a user decision gate; it is not an OS sandbox. Shell commands run with the current process user's permissions. The repository does not claim protection against malicious commands. Use a disposable container or a separate OS account for untrusted repositories.
 
 `read_file` also asks for approval before reading common sensitive paths such as
 `.env`, private keys, `.ssh`, `.aws`, or `.git`. This is a narrow credential
 boundary, not a guarantee that arbitrary secrets are detected; do not run an
 untrusted agent with valuable credentials in its environment.
 
+`search_code` is a bounded literal-text search: it skips hidden/generated
+directories and symlinked files, ignores files above 1 MB, caps results at 200,
+and does not interpret model-provided regular expressions. Use the
+approval-gated CLI shell tool only when a more expressive search is actually
+needed.
+
+Built-in tool arguments are validated against their Pydantic schemas before
+approval or execution; malformed/out-of-range model arguments become recorded
+tool failures. MCP input schemas are supplied by the configured server and are
+not treated as trusted policy.
+
 ## Offline evaluation
 
-The checked-in task set covers symbol search, file reading, a small edit followed by a unit test, one controlled tool failure and retry, an approval denial, recovery from an interrupted tool call, and durable knowledge recall.
+The checked-in task set covers symbol search, file reading, a small edit followed by a unit test, one controlled tool failure and retry, an approval denial, recovery from an interrupted tool call, and durable knowledge recall. Its deterministic scripted model verifies selected files, tool observations, test output, and absence of a denied write. This tests runtime behavior and those artifacts; it does not score semantic quality from a real model. `completed` still means the model stopped with a final answer, not that an external verifier certified the entire user goal.
 
 ```bash
 python evals/run.py

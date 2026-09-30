@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import secrets
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +13,8 @@ from urllib.parse import unquote, urlparse
 
 from .core.agent import Agent
 from .core.memory import SessionMemory
+
+logger = logging.getLogger(__name__)
 
 
 class AetherisAPIError(RuntimeError):
@@ -32,7 +36,7 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
         if not expected:
             return True
         supplied = self.headers.get("Authorization", "")
-        return supplied == f"Bearer {expected}"
+        return secrets.compare_digest(supplied, f"Bearer {expected}")
 
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -84,7 +88,12 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
         except AetherisAPIError as exc:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
-            self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            request_id = secrets.token_hex(8)
+            logger.exception("API request %s failed: %s", request_id, exc)
+            self._write_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "Internal server error.", "request_id": request_id},
+            )
         else:
             self._write_json(HTTPStatus.OK, result)
 
@@ -106,6 +115,19 @@ class AetherisAPIServer(ThreadingHTTPServer):
         read_only: bool,
         api_token: str | None,
     ) -> None:
+        host = address[0].strip("[]").lower()
+        if not api_token and host not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ValueError(
+                "AETHERIS_API_TOKEN is required when binding beyond loopback."
+            )
+        if not read_only:
+            raise ValueError(
+                "The HTTP API has no remote approval workflow; write-enabled mode is unavailable."
+            )
         super().__init__(address, AetherisRequestHandler)
         self.db_path = db_path
         self.workspace = Path(workspace).expanduser().resolve()

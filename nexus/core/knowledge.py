@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -8,8 +9,18 @@ from pathlib import Path
 class KnowledgeStore:
     """Human-readable long-term knowledge stored as Markdown files."""
 
-    def __init__(self, root: str | Path = ".aetheris/wiki"):
-        self.root = Path(root)
+    def __init__(
+        self,
+        root: str | Path = ".aetheris/wiki",
+        workspace_root: str | Path | None = None,
+    ):
+        candidate = Path(root).expanduser()
+        resolved = candidate.resolve()
+        if workspace_root is not None and not resolved.is_relative_to(
+            Path(workspace_root).expanduser().resolve()
+        ):
+            raise ValueError("Knowledge directory must stay inside the workspace.")
+        self.root = resolved
         self.root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -19,6 +30,8 @@ class KnowledgeStore:
 
     def remember(self, topic: str, content: str, source: str | None = None) -> Path:
         path = self.root / f"{self._slug(topic)}.md"
+        if path.is_symlink():
+            raise ValueError("Knowledge pages cannot be symbolic links.")
         source_line = (
             f"\n\nSource: `{source.strip()}`" if source and source.strip() else ""
         )
@@ -29,7 +42,11 @@ class KnowledgeStore:
         return path
 
     def pages(self) -> list[Path]:
-        return sorted(self.root.glob("*.md"))
+        return sorted(
+            path
+            for path in self.root.glob("*.md")
+            if not path.is_symlink() and path.is_file()
+        )
 
     def graph_dot(self) -> str:
         """Render lightweight Obsidian-style ``[[page]]`` links as Graphviz."""
@@ -49,10 +66,10 @@ class KnowledgeStore:
             '  node [shape=box, style="rounded,filled", fillcolor="#eef5f9", color="#24445c"];',
         ]
         for name in sorted(pages):
-            safe_name = name.replace('"', "'")
-            lines.append(f'  "{safe_name}" [label="{safe_name}"];')
+            node = json.dumps(name)
+            lines.append(f"  {node} [label={node}];")
         for source, target in sorted(edges):
-            lines.append(f'  "{source}" -> "{target}";')
+            lines.append(f"  {json.dumps(source)} -> {json.dumps(target)};")
         lines.append("}")
         return "\n".join(lines)
 

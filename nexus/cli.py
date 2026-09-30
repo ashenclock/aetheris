@@ -780,7 +780,8 @@ def wiki(
     graph: bool = typer.Option(False, "--graph"),
 ) -> None:
     """Inspect the human-readable knowledge base and optional page links."""
-    store = KnowledgeStore(Path(workspace).expanduser().resolve() / ".aetheris/wiki")
+    workspace_root = Path(workspace).expanduser().resolve()
+    store = KnowledgeStore(workspace_root / ".aetheris/wiki", workspace_root)
     pages = store.pages()
     if not pages:
         console.print("[dim]No durable wiki pages yet.[/dim]")
@@ -834,12 +835,20 @@ def serve(
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
     max_steps: int = typer.Option(12, "--max-steps"),
     cost_budget: float = typer.Option(0.25, "--cost-budget"),
-    read_only: bool = typer.Option(True, "--read-only/--allow-write"),
+    read_only: bool = typer.Option(
+        True,
+        "--read-only/--allow-write",
+        help="The HTTP adapter has no remote approval queue; --allow-write is rejected.",
+    ),
     api_token: str | None = typer.Option(
         None, "--api-token", envvar="AETHERIS_API_TOKEN"
     ),
 ) -> None:
     """Run the small authenticated HTTP adapter used by n8n and demos."""
+    if not read_only:
+        raise typer.BadParameter(
+            "The HTTP API has no remote approval workflow; use the interactive CLI for writes."
+        )
     serve_api(
         host=host,
         port=port,

@@ -40,7 +40,7 @@ class RememberSkill(BaseSkill):
             if self.workspace_root
             else ".aetheris/wiki"
         )
-        path = KnowledgeStore(root).remember(
+        path = KnowledgeStore(root, self.workspace_root).remember(
             kwargs["topic"], kwargs["content"], kwargs.get("source")
         )
         return f"Stored durable knowledge in {path}."

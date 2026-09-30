@@ -31,7 +31,9 @@ class RecallSkill(BaseSkill):
             if self.workspace_root
             else ".aetheris/wiki"
         )
-        matches = KnowledgeStore(root).recall(kwargs["query"], kwargs.get("limit", 5))
+        matches = KnowledgeStore(root, self.workspace_root).recall(
+            kwargs["query"], kwargs.get("limit", 5)
+        )
         if not matches:
             return "No durable knowledge matched the query."
         return "\n\n".join(f"## {path.stem}\n{text}" for path, text in matches)

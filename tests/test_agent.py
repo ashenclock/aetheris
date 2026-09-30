@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -92,6 +93,33 @@ def test_agent_can_expose_a_bounded_read_only_tool_set(tmp_path):
     )
 
 
+def test_agent_profile_name_cannot_traverse_workspace(tmp_path):
+    with pytest.raises(ValueError, match="name must use"):
+        Agent(
+            model_name="mock/offline",
+            workspace_root=tmp_path,
+            agent_profile="../../outside",
+        )
+
+
+def test_agent_profile_symlink_cannot_load_prompt_outside_profile_directory(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    profiles = workspace / ".aetheris/agents"
+    profiles.mkdir(parents=True)
+    private_prompt = tmp_path / "outside.md"
+    private_prompt.write_text("untrusted external prompt", encoding="utf-8")
+    (profiles / "reviewer.md").symlink_to(private_prompt)
+
+    with pytest.raises(ValueError, match="escapes its profile directory"):
+        Agent(
+            model_name="mock/offline",
+            workspace_root=workspace,
+            agent_profile="reviewer",
+        )
+
+
 def test_codex_model_selects_responses_api_adapter(tmp_path):
     agent = Agent(
         model_name="responses/codex-mini-latest",
@@ -164,6 +192,181 @@ async def test_tool_call_uses_assistant_and_matching_tool_messages(temp_db, tmp_
     assert history[3]["role"] == "tool"
     assert history[3]["tool_call_id"] == "read-1"
     assert "The answer is 42." in history[3]["content"]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_denied_tool_call_pauses_and_does_not_execute_sibling_calls(
+    temp_db, tmp_path
+):
+    calls = [
+        SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="write_file",
+                arguments=f'{{"filepath":"{filename}","content":"blocked"}}',
+            ),
+        )
+        for call_id, filename in (("write-1", "first.txt"), ("write-2", "second.txt"))
+    ]
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="approval-denial",
+        workspace_root=tmp_path,
+        enabled_skill_names={"write_file"},
+    )
+    await agent.init()
+    with (
+        patch(
+            "nexus.core.agent.acompletion",
+            new_callable=AsyncMock,
+            return_value=response(tool_calls=calls),
+        ),
+        patch.object(
+            agent.skills["write_file"], "confirm", new=AsyncMock(return_value=False)
+        ) as confirm,
+    ):
+        reply = await agent.chat("Write two files")
+
+    state = await agent.memory.load_state()
+    history = await agent.memory.get_history()
+    tool_results = [item for item in history if item.get("role") == "tool"]
+    assert "approval was denied" in reply
+    assert state is not None and state.status == TaskStatus.PAUSED
+    assert state.human_review_pauses == 1
+    assert state.tool_calls == 1 and state.tool_failures == 1
+    assert confirm.await_count == 1
+    assert not (tmp_path / "first.txt").exists()
+    assert not (tmp_path / "second.txt").exists()
+    assert [item["tool_call_id"] for item in tool_results] == ["write-1", "write-2"]
+    assert "not executed" in tool_results[1]["content"]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_builtin_tool_arguments_are_validated_before_execution(temp_db, tmp_path):
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        workspace_root=tmp_path,
+        enabled_skill_names={"search_code"},
+    )
+    await agent.init()
+    execute = AsyncMock(return_value="This should not run")
+    agent.skills["search_code"].execute = execute
+    call = {
+        "id": "invalid-search-limit",
+        "function": {
+            "name": "search_code",
+            "arguments": '{"pattern":"needle","max_results":99999}',
+        },
+    }
+    state = await agent._ensure_state("reject invalid tool parameters")
+
+    await agent._execute_tool_call(call, state)
+
+    result = (await agent.memory.get_history())[-1]
+    assert result["role"] == "tool"
+    assert result["tool_call_id"] == call["id"]
+    assert "invalid arguments" in result["content"]
+    assert execute.await_count == 0
+    assert state.tool_failures == 1
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_model_request_persists_paused_state(temp_db):
+    agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="cancel-model")
+    await agent.init()
+    started = asyncio.Event()
+
+    async def wait_for_model(**_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch("nexus.core.agent.acompletion", new=wait_for_model):
+        task = asyncio.create_task(agent.chat("Inspect the project"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    state = await agent.memory.load_state()
+    checkpoint = await agent.memory.latest_checkpoint()
+    assert state is not None and state.status == TaskStatus.PAUSED
+    assert checkpoint is not None
+    assert "canceled while waiting" in checkpoint[1]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_tool_recovers_before_new_user_message(temp_db, tmp_path):
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="cancel-tool",
+        workspace_root=tmp_path,
+        enabled_skill_names={"write_file"},
+    )
+    await agent.init()
+    started = asyncio.Event()
+
+    async def side_effect_then_wait(**_kwargs):
+        (tmp_path / "side-effect.txt").write_text("already happened", encoding="utf-8")
+        started.set()
+        await asyncio.Event().wait()
+
+    tool_call = SimpleNamespace(
+        id="write-before-crash",
+        function=SimpleNamespace(
+            name="write_file",
+            arguments='{"filepath":"side-effect.txt","content":"already happened"}',
+        ),
+    )
+    model = AsyncMock(
+        side_effect=[response(tool_calls=[tool_call]), response("Resumed")]
+    )
+    with (
+        patch("nexus.core.agent.acompletion", new=model),
+        patch.object(
+            agent.skills["write_file"], "confirm", new=AsyncMock(return_value=True)
+        ),
+        patch.object(agent.skills["write_file"], "execute", new=side_effect_then_wait),
+    ):
+        task = asyncio.create_task(agent.chat("Write the file"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        reply = await agent.chat("Continue after interruption")
+
+    history = await agent.memory.get_history()
+    call_index = next(
+        index
+        for index, message in enumerate(history)
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    result_index = next(
+        index
+        for index, message in enumerate(history)
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "write-before-crash"
+    )
+    continuation_index = next(
+        index
+        for index, message in enumerate(history)
+        if message.get("role") == "user"
+        and message.get("content") == "Continue after interruption"
+    )
+    state = await agent.memory.load_state()
+    assert reply == "Resumed"
+    assert (tmp_path / "side-effect.txt").read_text(
+        encoding="utf-8"
+    ) == "already happened"
+    assert call_index < result_index < continuation_index
+    assert state is not None and state.recovered_interrupted_calls == 1
+    assert state.status == TaskStatus.COMPLETED
     await agent.close()
 
 

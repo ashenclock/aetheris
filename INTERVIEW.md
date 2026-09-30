@@ -73,6 +73,10 @@ token counters, recovery and approval counters, and checkpoint count. The model
 cannot change these values directly. The current statuses are `running`,
 `paused`, `completed`, and `failed`.
 
+`completed` means the model returned a non-empty final response. The generic
+runtime cannot prove that every user goal was achieved; task-specific tests,
+artifact checks, or a human review provide that verification.
+
 Step limits always work. Cost limits work when the provider exposes a finite
 LiteLLM cost estimate. A response can cross the configured cost budget before
 the next checkpoint, so a provider-side spend limit would still be required for
@@ -190,14 +194,30 @@ completion tokens. Latency is machine-dependent.
 - A model request error pauses the task and preserves the session for resume.
 - A malformed or empty model response pauses with a checkpoint. The next run needs a
   valid provider response.
-- Unknown tools, invalid JSON arguments, command failures, and denied approvals
-  become tool failures. Three consecutive failures pause the task.
+- Unknown tools, invalid JSON arguments, and command failures become recorded
+  tool failures. A denied approval pauses immediately; sibling tool calls from
+  the same model response are recorded as not executed.
 - A max-step or known cost threshold pauses before more work. Unknown provider
   pricing cannot produce a hard cost guarantee.
 - Missing task state or corrupt SQLite JSON is an understandable startup error,
   but there is no repair tool for arbitrary database corruption.
 - A crash while a tool is executing is recoverable as an ambiguous interrupted
   call, not as proof that the external side effect did not happen.
+- Cancellation during a model request or tool execution checkpoints a paused
+  task. On resume, a pending tool result is recorded before the new user
+  instruction, preserving the provider tool-call protocol. The effect of a
+  canceled write/shell/MCP call can still be uncertain; inspect before retry.
+- The HTTP API is single-tenant and read-only because it has no remote approval
+  flow. Network binds require a bearer token. A shared token does not provide
+  per-user session ownership or multi-tenant isolation.
+- `search_code` intentionally uses literal matching and skips hidden,
+  generated, symlinked, and files larger than 1 MB; it returns at most 200
+  matches. This avoids arbitrary regex backtracking and accidental traversal
+  outside the workspace; an approved shell search remains available for more
+  expressive queries.
+- Built-in tool arguments are parsed against their Pydantic schemas at runtime
+  rather than relying on the model to honor JSON-schema bounds. Invalid
+  arguments are returned as tool failures before approval or side effects.
 
 ## What I would change for production
 
