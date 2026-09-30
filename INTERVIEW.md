@@ -20,13 +20,17 @@ decisions. SQLite keeps the ordered history and state inspectable. Markdown is
 enough for a first version of durable project knowledge because the corpus is
 small and people can review it directly.
 
+The CLI also exposes a safe plan-first workflow, project-local Markdown agent
+profiles and skills, and approval-gated local MCP tools. These are thin product
+surfaces around the same runtime, not a second orchestration engine.
+
 ## Architecture walkthrough
 
 ```text
 Goal
   |
   v
-Agent.chat -> load state and bounded context
+CLI goal/plan/chat -> load state and bounded context
   |
   v
 LiteLLM model -> final answer or assistant tool call with ID
@@ -41,6 +45,7 @@ Skill execution -> observation
 SQLite checkpoint -> update state and append tool result
   |
   +----> Markdown wiki retrieval
+  +----> project profiles, skills, local MCP tools
   +----> optional Jev watchdog
 ```
 
@@ -123,6 +128,21 @@ only a secondary signal; it is not a sandbox or a security proof. The adapter
 fails closed: low-confidence or ambiguous responses pause the run instead of
 silently allowing it.
 
+## Project profiles, skills, and MCP
+
+`aetheris plan` exposes a read-only inspection mode. `aetheris goal` runs that
+mode first by default and prints the execute command after the plan is saved.
+Project-local `.aetheris/agents/*.md` files describe a specialist role, while
+`.aetheris/skills/*/SKILL.md` files describe a bounded workflow. Both are
+untrusted configuration: they cannot add tools or weaken runtime policy.
+
+`aetheris mcp add` stores a local command in `.aetheris/mcp.json`; `mcp test`
+actually starts it and performs MCP initialization and tool discovery. In
+execute mode, discovered tools become explicit skills named
+`mcp__server__tool` and require confirmation for every call. Plan mode does
+not start external MCP processes. This keeps the integration useful for local
+CLI experiments while keeping the Streamlit demo read-only.
+
 ## Human approval and security
 
 Approval is a user decision gate on `write_file`, `edit_file`, and
@@ -188,7 +208,9 @@ SQLite implementation.
    persistence and interrupted-call recovery.
 4. `nexus/core/policy.py` — point out the narrow Jev interface and deterministic
    fallback.
-5. `evals/run.py` — point out that the evaluation drives the real runtime with
+5. `nexus/cli.py` — point out plan-first goals, status output, and the explicit
+   MCP/profile commands.
+6. `evals/run.py` — point out that the evaluation drives the real runtime with
    scripted model responses and no external API.
 
 ## Likely interview questions
@@ -312,6 +334,18 @@ I would keep the current explicit state, memory, policy, and skill boundaries.
 I would avoid adding distributed orchestration or semantic memory until a
 measured requirement justifies it.
 
+### 21. What does the MCP integration trust?
+
+Only the local process connection and its returned data. Tool descriptions,
+annotations, and server instructions are untrusted. Aetheris exposes each tool
+explicitly, requires confirmation, and never treats MCP metadata as policy.
+
+### 22. What does plan mode guarantee?
+
+It removes mutating and shell skills and does not start configured MCP servers.
+It produces a proposal and an evidence inventory. It does not prove that the
+later execute phase will succeed.
+
 ## Full repository walkthrough
 
 Show the worktree before opening the core loop:
@@ -319,7 +353,8 @@ Show the worktree before opening the core loop:
 ```text
 pyproject.toml / poetry.lock  package and reproducible dependency metadata
 nexus/                         installable runtime package
-  cli.py                       terminal entry points
+  cli.py                       terminal entry points, plan/goal, profiles, MCP
+  project.py / mcp.py          local config and the small MCP stdio adapter
   core/                        loop, state, SQLite memory, policy, prompts
   skills/                      explicit tools and approval boundaries
   web/                         bounded public-GitHub archive connector
@@ -328,6 +363,7 @@ tests/                         focused runtime and protocol tests
 streamlit_app.py              read-only hosted demo
 Dockerfile                    portable CLI image
 Dockerfile.streamlit          portable web image
+.aetheris/                     local wiki, plans, profiles, MCP config (ignored)
 README.md / INTERVIEW.md      user and interview documentation
 ```
 
@@ -351,11 +387,10 @@ runtime and protocol without pretending to sandbox arbitrary shell execution.
 For Community Cloud, `requirements.txt` and `streamlit_app.py` are at the
 repository root and credentials belong in platform secrets.
 
-I chose a direct GitHub connector for the interview demo instead of making MCP
-a hard dependency. The official MCP Python SDK supports stdio and HTTP
-transports, so an MCP adapter is a reasonable next step for authenticated
-remote tools; a local stdio server in a public Streamlit app would add process
-lifecycle and credential complexity before this project has measured a need.
+The CLI has a small local stdio MCP adapter and an explicit `mcp test` command.
+The hosted demo keeps using the direct GitHub connector so it does not spawn
+arbitrary project processes or introduce a second credential boundary. Tool
+descriptions and server instructions remain untrusted input.
 
 ## ReAct, sub-agents, and knowledge
 
@@ -415,5 +450,7 @@ approval pause, a process interruption with pending tool-call recovery, and
 the max-step boundary. Then show `aetheris status` and `aetheris wiki --graph`.
 For the n8n path, show an invalid bearer token and a read-only task. Explain
 that model errors pause, malformed responses pause, SQLite corruption is not
-magically repaired, and an interrupted side effect is ambiguous rather than
-exactly-once.
+magically repaired, MCP discovery can fail without taking down the core runtime,
+and an interrupted side effect is ambiguous rather than exactly-once. Also show
+that hostile repository text cannot override the system prompt or bypass
+approval.

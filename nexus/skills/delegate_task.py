@@ -10,9 +10,13 @@ from .base_skill import BaseSkill
 
 
 class DelegateTaskSchema(BaseModel):
-    task: str = Field(..., min_length=1, description="A bounded read-only research task")
+    task: str = Field(
+        ..., min_length=1, description="A bounded read-only research task"
+    )
     role: str = Field("researcher", description="The sub-agent's narrow role")
-    max_steps: int = Field(6, ge=1, le=12, description="Maximum steps for the child agent")
+    max_steps: int = Field(
+        6, ge=1, le=12, description="Maximum steps for the child agent"
+    )
 
 
 class DelegateTaskSkill(BaseSkill):
@@ -80,9 +84,7 @@ class DelegateTaskSkill(BaseSkill):
             return f"Error: child session was not started: {exc}."
 
         if self.parent_state is not None:
-            self.parent_state.record_subagent_budget(
-                self.delegation_budget.snapshot()
-            )
+            self.parent_state.record_subagent_budget(self.delegation_budget.snapshot())
             if self.parent_memory is not None:
                 await self.parent_memory.checkpoint(
                     self.parent_state, "Reserved budget for child session."
@@ -97,7 +99,12 @@ class DelegateTaskSkill(BaseSkill):
             max_steps=min(requested_steps, 12),
             cost_budget_usd=reservation.amount_usd,
             workspace_root=self.workspace_root,
-            enabled_skill_names={"list_directory", "read_file", "search_code", "recall"},
+            enabled_skill_names={
+                "list_directory",
+                "read_file",
+                "search_code",
+                "recall",
+            },
             context_char_budget=self.context_char_budget,
         )
         await child.init()

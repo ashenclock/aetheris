@@ -5,7 +5,17 @@ from pathlib import Path
 from typing import Any
 
 
-SUPPORTED_AUDIO_SUFFIXES = {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
+SUPPORTED_AUDIO_SUFFIXES = {
+    ".flac",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpga",
+    ".m4a",
+    ".ogg",
+    ".wav",
+    ".webm",
+}
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
@@ -29,9 +39,13 @@ def transcribe_file(
             f"Unsupported audio format '{path.suffix}'. Supported: {', '.join(sorted(SUPPORTED_AUDIO_SUFFIXES))}."
         )
     if path.stat().st_size > MAX_AUDIO_BYTES:
-        raise TranscriptionError("Audio files are limited to 25 MB by the API path used here.")
+        raise TranscriptionError(
+            "Audio files are limited to 25 MB by the API path used here."
+        )
     if not os.getenv("OPENAI_API_KEY"):
-        raise TranscriptionError("OPENAI_API_KEY is not configured; the key is never read from CLI arguments.")
+        raise TranscriptionError(
+            "OPENAI_API_KEY is not configured; the key is never read from CLI arguments."
+        )
 
     try:
         from openai import OpenAI

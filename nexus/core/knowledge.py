@@ -19,7 +19,9 @@ class KnowledgeStore:
 
     def remember(self, topic: str, content: str, source: str | None = None) -> Path:
         path = self.root / f"{self._slug(topic)}.md"
-        source_line = f"\n\nSource: `{source.strip()}`" if source and source.strip() else ""
+        source_line = (
+            f"\n\nSource: `{source.strip()}`" if source and source.strip() else ""
+        )
         path.write_text(
             f"# {topic.strip()}\n\n{content.strip()}{source_line}\n",
             encoding="utf-8",
@@ -42,7 +44,7 @@ class KnowledgeStore:
 
         lines = [
             "digraph Knowledge {",
-            '  rankdir=LR;',
+            "  rankdir=LR;",
             '  graph [bgcolor="transparent", pad=0.2];',
             '  node [shape=box, style="rounded,filled", fillcolor="#eef5f9", color="#24445c"];',
         ]

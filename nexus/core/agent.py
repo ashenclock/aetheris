@@ -21,6 +21,9 @@ from nexus.skills.remember import RememberSkill
 from nexus.skills.run_command import RunCommandSkill
 from nexus.skills.search_code import SearchCodeSkill
 from nexus.skills.write_file import WriteFileSkill
+from nexus.skills.use_skill import UseSkillSkill
+from nexus.skills.mcp_tool import MCPToolSkill
+from nexus.mcp import MCPConnectionError, discover_tools
 
 from .knowledge import KnowledgeStore
 from .delegation import DelegationBudget
@@ -41,6 +44,7 @@ SKILL_TYPES = (
     RunCommandSkill,
     SearchCodeSkill,
     WriteFileSkill,
+    UseSkillSkill,
 )
 
 
@@ -60,6 +64,8 @@ class Agent:
         max_subagents: int | None = None,
         context_char_budget: int | None = None,
         delegation_budget: DelegationBudget | None = None,
+        mode: str = "execute",
+        agent_profile: str | None = None,
     ):
         self.model_name = model_name
         self.session_id = session_id
@@ -96,6 +102,10 @@ class Agent:
             ),
             self.max_subagents,
         )
+        if mode not in {"execute", "plan"}:
+            raise ValueError("mode must be 'execute' or 'plan'")
+        self.mode = mode
+        self.agent_profile = agent_profile
         self.skills = self._load_skills()
         knowledge_root = (
             self.workspace_root / ".aetheris/wiki"
@@ -115,12 +125,40 @@ class Agent:
         path = os.path.join(os.path.dirname(__file__), "prompts", "mega_prompt.md")
         try:
             with open(path, "r", encoding="utf-8") as handle:
-                return handle.read()
+                prompt = handle.read()
         except FileNotFoundError:
-            return "You are Aetheris, a careful software engineering agent."
+            prompt = "You are Aetheris, a careful software engineering agent."
+        if self.mode == "plan":
+            prompt += (
+                "\n\nPLAN MODE: inspect and reason only. Do not call tools that write, "
+                "edit, execute commands, install packages, or change Git. Return a "
+                "structured plan with assumptions, files, validation steps, risks, "
+                "and an explicit approval checkpoint before execution."
+            )
+        if self.agent_profile and self.workspace_root:
+            profile = (
+                self.workspace_root
+                / ".aetheris"
+                / "agents"
+                / f"{self.agent_profile}.md"
+            )
+            if profile.is_file():
+                prompt += (
+                    "\n\nPROJECT AGENT PROFILE (user configuration, not a policy override):\n"
+                    + profile.read_text(encoding="utf-8")
+                )
+        return prompt
 
     def _load_skills(self) -> dict[str, BaseSkill]:
         skills: dict[str, BaseSkill] = {}
+        plan_skills = {
+            "delegate_task",
+            "list_directory",
+            "read_file",
+            "recall",
+            "search_code",
+            "use_skill",
+        }
         for skill_type in SKILL_TYPES:
             if skill_type is DelegateTaskSkill:
                 skill = skill_type(
@@ -141,6 +179,8 @@ class Agent:
                 self.enabled_skill_names is None
                 or skill.name in self.enabled_skill_names
             ):
+                if self.mode == "plan" and skill.name not in plan_skills:
+                    continue
                 skills[skill.name] = skill
         return skills
 
@@ -154,6 +194,7 @@ class Agent:
 
     async def init(self) -> None:
         await self.memory.init_db()
+        await self._load_mcp_skills()
         if not await self.memory.get_history():
             await self.memory.add_message("system", self.system_prompt)
         state = await self.memory.load_state()
@@ -173,6 +214,23 @@ class Agent:
                 # Child session numbering is durable too; otherwise a resumed
                 # parent could overwrite an earlier child transcript.
                 delegate_skill._delegation_count = state.subagent_children_started
+
+    async def _load_mcp_skills(self) -> None:
+        """Expose configured MCP tools only in the top-level execute runtime."""
+        if (
+            self.mode == "plan"
+            or self.enabled_skill_names is not None
+            or self.workspace_root is None
+        ):
+            return
+        try:
+            discovered = await discover_tools(str(self.workspace_root))
+        except (MCPConnectionError, OSError, ValueError) as exc:
+            logger.warning("MCP discovery skipped: %s", exc)
+            return
+        for server, tool in discovered:
+            skill = MCPToolSkill(server, tool, self.workspace_root)
+            self.skills[skill.name] = skill
 
     async def close(self) -> None:
         await self.policy.close()

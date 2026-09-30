@@ -46,7 +46,9 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
         try:
             size = int(self.headers.get("Content-Length", "0"))
             if size <= 0 or size > 64 * 1024:
-                raise AetherisAPIError("Request body must be between 1 byte and 64 KiB.")
+                raise AetherisAPIError(
+                    "Request body must be between 1 byte and 64 KiB."
+                )
             value = json.loads(self.rfile.read(size))
         except (ValueError, json.JSONDecodeError) as exc:
             raise AetherisAPIError("Request body must be valid JSON.") from exc
@@ -123,7 +125,9 @@ class AetherisAPIServer(ThreadingHTTPServer):
             raise AetherisAPIError("'session' must be a short non-empty string.")
         max_steps = body.get("max_steps", self.max_steps)
         if not isinstance(max_steps, int) or not 1 <= max_steps <= self.max_steps:
-            raise AetherisAPIError(f"'max_steps' must be an integer between 1 and {self.max_steps}.")
+            raise AetherisAPIError(
+                f"'max_steps' must be an integer between 1 and {self.max_steps}."
+            )
 
         enabled = (
             {"list_directory", "read_file", "search_code", "recall"}

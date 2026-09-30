@@ -10,9 +10,7 @@ from nexus.core.delegation import DelegationBudget
 def response(text: str):
     return SimpleNamespace(
         choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=text, tool_calls=None)
-            )
+            SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))
         ],
         usage=SimpleNamespace(prompt_tokens=4, completion_tokens=3),
     )
@@ -34,10 +32,7 @@ async def test_delegate_task_runs_one_read_only_child(tmp_path):
     assert "parent:subagent:1" in report
     assert "README.md" in report
     assert model.call_count == 1
-    tool_names = {
-        item["function"]["name"]
-        for item in model.call_args.kwargs["tools"]
-    }
+    tool_names = {item["function"]["name"] for item in model.call_args.kwargs["tools"]}
     assert "delegate_task" not in tool_names
     assert "read_file" in tool_names
     assert model.call_args.kwargs["model"] == "mock/local-small"

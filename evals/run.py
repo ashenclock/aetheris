@@ -219,7 +219,9 @@ async def run_suite(task_ids: set[str] | None = None) -> dict:
         tasks = [task for task in tasks if task["id"] in task_ids]
         missing = task_ids - {task["id"] for task in tasks}
         if missing:
-            raise ValueError(f"Unknown evaluation task(s): {', '.join(sorted(missing))}")
+            raise ValueError(
+                f"Unknown evaluation task(s): {', '.join(sorted(missing))}"
+            )
     if not tasks:
         raise ValueError("No evaluation tasks selected")
 

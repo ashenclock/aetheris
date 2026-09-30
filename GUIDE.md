@@ -81,6 +81,50 @@ sessions use their own SQLite session IDs (`parent:subagent:N`) and a shorter
 context. If provider pricing is unavailable, the reservation is treated as
 spent. This is intentionally explicit rather than an invisible provider switch.
 
+## 1.5 Use plan-first goals and project extensions
+
+For a real task, start with a read-only plan and save it beside the project:
+
+```bash
+aetheris plan "Review this repository and propose the smallest safe change" \
+  --workspace "$PWD" --session review-plan \
+  --output .aetheris/plans/review-plan.md
+
+aetheris goal "Repair the failing tests" --plan-first --workspace "$PWD"
+```
+
+`goal` prints the execute command after the plan. Review the files and risks
+before starting `aetheris run`. A plan is a proposal, not proof that the task
+has been implemented or deployed. Use `--json` on `plan`, `run`, and `resume`
+when another script needs the reply and authoritative state.
+
+Create local, reviewable extensions without editing the installed package:
+
+```bash
+aetheris skill create reviewer --workspace .
+aetheris agent create security --workspace .
+aetheris skill list --workspace .
+aetheris agent list --workspace .
+```
+
+Project profiles and skills are prompt guidance. They cannot grant tools,
+disable approvals, or override the system prompt.
+
+Register and test a local MCP stdio server:
+
+```bash
+aetheris mcp add local-demo --command "python tests/fixtures/mcp_demo_server.py" \
+  --workspace .
+aetheris mcp validate --workspace .
+aetheris mcp test --workspace .
+aetheris mcp list --workspace .
+```
+
+`mcp test` launches the process and performs initialization plus tool discovery.
+In execute mode each discovered tool is approval-gated. Plan mode does not
+start MCP processes. MCP descriptions and server instructions are untrusted
+data, and the local adapter is not a sandbox.
+
 ## 2. Observe a task from another terminal
 
 Use a dedicated database and session for every experiment:

@@ -110,9 +110,9 @@ GitHub branch, keep `requirements.txt` at the repository root, and add the
 provider key in Streamlit Secrets. Never commit `.streamlit/secrets.toml`.
 
 This demo uses a direct GitHub archive connector rather than a local MCP
-process. MCP is a useful future adapter for remote, authenticated tools, but a
-local stdio server would add a process lifecycle and credential surface to a
-public hosted demo without improving the interview proof point.
+process. Aetheris can connect to project-local stdio MCP servers for the CLI,
+but the hosted read-only surface keeps that process and credential boundary
+out of a public Streamlit deployment.
 
 ## API transcription and CLI surface
 
@@ -143,7 +143,20 @@ aetheris status --db aetheris_memory.db --session repair-tests
 aetheris skills
 aetheris wiki --workspace . --graph
 aetheris serve --read-only --api-token "$AETHERIS_API_TOKEN"
+aetheris plan "Review the repository and propose a safe change" --workspace .
+aetheris goal "Repair the failing tests" --plan-first --workspace .
+aetheris skill create reviewer --workspace .
+aetheris agent create security --workspace .
+aetheris mcp add local-demo --command "python server.py" --workspace .
+aetheris mcp test --workspace .
 ```
+
+`plan` uses a read-only tool set and saves a proposal with `--output`.
+`goal` defaults to plan-first and prints the execute command after the plan.
+Project agents and skills are Markdown configuration, so they remain reviewable
+and cannot bypass runtime approvals. `mcp test` performs a real initialize and
+tools/list exchange. Discovered MCP tools remain approval-gated, and plan mode
+does not start MCP servers.
 
 For an OpenAI Codex-compatible Responses model, use the explicit adapter
 prefix, for example `AETHERIS_MODEL=responses/codex-mini-latest`. The adapter
@@ -251,9 +264,11 @@ The runner uses a scripted local model and a test-only tool that fails once. It 
 pyproject.toml            # Package metadata, dependencies, and aetheris CLI
 poetry.lock               # Reproducible dependency resolution
 nexus/                    # Runtime package installed by the CLI and Docker image
-  cli.py                  # `aetheris chat` and `aetheris run`
+  cli.py                  # CLI, plan/goal modes, profiles, and MCP commands
+  project.py              # local agents, skills, and MCP configuration
+  mcp.py                  # small JSONL stdio MCP client
   core/                   # Agent loop, state, memory, knowledge, policy, tracking
-  skills/                 # Explicit tool registry: files, shell, search, wiki
+  skills/                 # Explicit tools plus approval-gated MCP wrappers
 evals/                    # Offline scripted-model scenarios and demo
 tests/                    # Runtime, protocol, persistence, and policy tests
 Dockerfile                # Small non-root portable image
@@ -266,6 +281,7 @@ nexus/api.py               # Small authenticated adapter for n8n/webhooks
 nexus/transcription.py     # Optional hosted audio transcription adapter
 README.md                 # Architecture, usage, limitations, and trade-offs
 INTERVIEW.md              # Interview walkthrough and repository-specific Q&A
+.aetheris/                # Local profiles, plans, MCP config, and wiki (ignored)
 ```
 
 The folders have different responsibilities: `nexus/core` owns control and
@@ -322,6 +338,11 @@ why multiple replicas require shared state first.
 - Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.
 - A long run still depends on the model's ability to choose useful actions. Checkpoints preserve progress; they do not guarantee completion.
 - A malformed or empty model response pauses the task with a checkpoint, but recovery still depends on a later valid response.
+- MCP support currently targets local stdio servers and JSONL messages. It does
+  not provide remote transport, server isolation, or permission grants based on
+  MCP metadata.
+- Project agent profiles and skills guide the model but are not a second policy
+  engine. Runtime checks and approvals remain authoritative.
 
 ## License
 

@@ -81,7 +81,9 @@ def _request_bytes(url: str, *, max_bytes: int) -> bytes:
                 chunks.append(chunk)
             return b"".join(chunks)
     except HTTPError as exc:
-        raise GitHubRepositoryError(f"GitHub returned HTTP {exc.code} for this repository.") from exc
+        raise GitHubRepositoryError(
+            f"GitHub returned HTTP {exc.code} for this repository."
+        ) from exc
     except URLError as exc:
         raise GitHubRepositoryError(f"Could not reach GitHub: {exc.reason}") from exc
 
@@ -127,7 +129,9 @@ def download_public_repository(
         temporary.cleanup()
         if isinstance(exc, GitHubRepositoryError):
             raise
-        raise GitHubRepositoryError("GitHub returned an invalid repository archive.") from exc
+        raise GitHubRepositoryError(
+            "GitHub returned an invalid repository archive."
+        ) from exc
 
     roots = [path for path in extraction_root.iterdir() if path.is_dir()]
     if len(roots) != 1:

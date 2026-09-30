@@ -82,9 +82,7 @@ class TaskState(BaseModel):
         self.subagent_sessions += 1
         self.subagent_failures += int(summary.get("failed", False))
         self.subagent_prompt_tokens += int(summary.get("prompt_tokens", 0) or 0)
-        self.subagent_completion_tokens += int(
-            summary.get("completion_tokens", 0) or 0
-        )
+        self.subagent_completion_tokens += int(summary.get("completion_tokens", 0) or 0)
         cost = summary.get("estimated_cost_usd")
         if cost is not None:
             self.subagent_estimated_cost_usd = (

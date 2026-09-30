@@ -77,16 +77,22 @@ def _show_history(history: list[dict[str, Any]]) -> None:
                 label = f"tool:{message.get('name', 'unknown')} ({message.get('tool_call_id', '?')})"
             else:
                 label = role
-            st.code(f"{label}\n{message.get('content') or message.get('tool_calls') or ''}")
+            st.code(
+                f"{label}\n{message.get('content') or message.get('tool_calls') or ''}"
+            )
 
 
 def _show_knowledge(root: Path) -> None:
     store = KnowledgeStore(root / ".aetheris/wiki")
     pages = store.pages()
     with st.expander("Knowledge base / wiki", expanded=bool(pages)):
-        st.caption("Human-readable durable facts. Use [[page-topic]] inside Markdown to create a link.")
+        st.caption(
+            "Human-readable durable facts. Use [[page-topic]] inside Markdown to create a link."
+        )
         if not pages:
-            st.info("No durable facts in this workspace yet. The local CLI can create them with the remember skill.")
+            st.info(
+                "No durable facts in this workspace yet. The local CLI can create them with the remember skill."
+            )
             return
         st.graphviz_chart(store.graph_dot(), use_container_width=True)
         for page in pages:
@@ -96,7 +102,9 @@ def _show_knowledge(root: Path) -> None:
 
 st.set_page_config(page_title="Aetheris", page_icon="◈", layout="wide")
 st.title("Aetheris")
-st.caption("A small, resumable coding-agent runtime — deployed as a read-only GitHub exploration demo.")
+st.caption(
+    "A small, resumable coding-agent runtime — deployed as a read-only GitHub exploration demo."
+)
 
 if "repo_root" not in st.session_state:
     st.session_state.repo_root = None
@@ -109,23 +117,33 @@ if "messages" not in st.session_state:
 
 with st.sidebar:
     st.header("Demo controls")
-    model = st.text_input("Model", value=os.getenv("AETHERIS_MODEL", "openai/gpt-4o-mini"))
+    model = st.text_input(
+        "Model", value=os.getenv("AETHERIS_MODEL", "openai/gpt-4o-mini")
+    )
     max_steps = st.slider("Maximum steps", min_value=1, max_value=12, value=6)
-    st.caption("The hosted demo exposes only read-only tools. Shell, write, edit, and push operations are intentionally unavailable.")
+    st.caption(
+        "The hosted demo exposes only read-only tools. Shell, write, edit, and push operations are intentionally unavailable."
+    )
 
     st.subheader("Load a public repository")
-    repository_url = st.text_input("GitHub URL", value="https://github.com/ashenclock/aetheris")
+    repository_url = st.text_input(
+        "GitHub URL", value="https://github.com/ashenclock/aetheris"
+    )
     branch = st.text_input("Branch (optional)", value="feature/long-horizon-agent")
     if st.button("Load repository", type="primary"):
         try:
             with st.spinner("Downloading a bounded public archive from GitHub..."):
-                repository, root, temporary = download_public_repository(repository_url, branch)
+                repository, root, temporary = download_public_repository(
+                    repository_url, branch
+                )
             old_temp = st.session_state.repo_temp
             if old_temp is not None:
                 old_temp.cleanup()
             st.session_state.repo_temp = temporary
             st.session_state.repo_root = str(root)
-            st.session_state.repo_name = f"{repository.owner}/{repository.name}:{branch or 'default'}"
+            st.session_state.repo_name = (
+                f"{repository.owner}/{repository.name}:{branch or 'default'}"
+            )
             st.session_state.messages = []
             st.success(f"Loaded {st.session_state.repo_name}")
         except GitHubRepositoryError as exc:
@@ -175,7 +193,9 @@ with st.sidebar:
 if st.session_state.get("offline_summary"):
     summary = st.session_state.offline_summary
     st.subheader("Offline runtime evidence")
-    st.success(f"{summary['success_rate']:.0%} success across {len(summary['tasks'])} deterministic cases")
+    st.success(
+        f"{summary['success_rate']:.0%} success across {len(summary['tasks'])} deterministic cases"
+    )
     st.json(summary)
 
 if st.session_state.repo_root:
@@ -183,7 +203,9 @@ if st.session_state.repo_root:
     database = root / ".aetheris" / "streamlit.sqlite3"
     database.parent.mkdir(parents=True, exist_ok=True)
     st.subheader(f"Repository: {st.session_state.repo_name}")
-    st.info("This is a bounded read-only analysis. The repository is held in an isolated temporary workspace and is removed when the session is replaced.")
+    st.info(
+        "This is a bounded read-only analysis. The repository is held in an isolated temporary workspace and is removed when the session is replaced."
+    )
     _show_knowledge(root)
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -212,11 +234,17 @@ if st.session_state.repo_root:
                     st.markdown(answer)
                     _show_state(state)
                     _show_history(history)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer}
+                    )
                 except Exception as exc:
                     st.error(f"The model request failed: {exc}")
-                    st.caption("Configure the provider key in Streamlit Secrets or the environment before using the live GitHub analysis.")
+                    st.caption(
+                        "Configure the provider key in Streamlit Secrets or the environment before using the live GitHub analysis."
+                    )
 else:
     st.subheader("Start with the deterministic path")
-    st.write("Load a public GitHub repository, then ask a bounded read-only question. The offline demo is available in the sidebar and requires no API key.")
+    st.write(
+        "Load a public GitHub repository, then ask a bounded read-only question. The offline demo is available in the sidebar and requires no API key."
+    )
     st.code("streamlit run streamlit_app.py", language="bash")

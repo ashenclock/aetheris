@@ -23,7 +23,15 @@ from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
 from nexus.core.memory import SessionMemory
 from nexus.core.state import TaskState
+from nexus.mcp import MCPConnectionError, MCPClient, configured_servers
 from nexus.providers import discover_providers, provider_for_model
+from nexus.project import (
+    add_mcp_server,
+    create_agent,
+    create_skill,
+    load_mcp_config,
+    project_dir,
+)
 from nexus.transcription import TranscriptionError, transcribe_file
 
 load_dotenv()
@@ -34,6 +42,12 @@ app = typer.Typer(
     help="A small, resumable coding agent with inspectable runtime state.",
     no_args_is_help=True,
 )
+agent_app = typer.Typer(help="Create and run project-local agent profiles.")
+skill_app = typer.Typer(help="Create and inspect project-local skills.")
+mcp_app = typer.Typer(help="Configure and validate project-local MCP servers.")
+app.add_typer(agent_app, name="agent")
+app.add_typer(skill_app, name="skill")
+app.add_typer(mcp_app, name="mcp")
 console = Console()
 
 
@@ -91,6 +105,8 @@ def _agent(
     max_steps: int,
     cost_budget: float,
     workspace: str,
+    mode: str = "execute",
+    agent_profile: str | None = None,
 ) -> Agent:
     return Agent(
         model,
@@ -99,6 +115,8 @@ def _agent(
         max_steps,
         cost_budget,
         workspace_root=Path(workspace).expanduser().resolve(),
+        mode=mode,
+        agent_profile=agent_profile,
     )
 
 
@@ -110,8 +128,13 @@ def chat(
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
     cost_budget: float = typer.Option(1.0, "--cost-budget"),
+    agent_profile: str | None = typer.Option(
+        None, "--agent", help="Project agent profile"
+    ),
 ) -> None:
-    asyncio.run(_chat(model, db_path, session, workspace, max_steps, cost_budget))
+    asyncio.run(
+        _chat(model, db_path, session, workspace, max_steps, cost_budget, agent_profile)
+    )
 
 
 async def _chat(
@@ -121,6 +144,7 @@ async def _chat(
     workspace: str,
     max_steps: int,
     cost_budget: float,
+    agent_profile: str | None = None,
 ) -> None:
     agent = _agent(
         model=model,
@@ -129,6 +153,7 @@ async def _chat(
         max_steps=max_steps,
         cost_budget=cost_budget,
         workspace=workspace,
+        agent_profile=agent_profile,
     )
     await agent.init()
     prompt = PromptSession()
@@ -151,11 +176,27 @@ async def _chat(
                 break
             if raw == "/help":
                 console.print(
-                    "[cyan]/new NAME[/cyan] starts a session, [cyan]/resume NAME[/cyan] switches to one, [cyan]/status[/cyan] prints state, [cyan]@path[/cyan] attaches a text file."
+                    "[cyan]/new NAME[/cyan] session, [cyan]/resume NAME[/cyan] switch, "
+                    "[cyan]/status[/cyan] state, [cyan]/skills[/cyan] project skills, "
+                    "[cyan]/mcp[/cyan] servers, [cyan]/permissions[/cyan] boundaries, "
+                    "[cyan]@path[/cyan] attach a text file. Use `aetheris plan` for plan mode."
                 )
                 continue
             if raw == "/status":
                 _print_state(await agent.memory.load_state())
+                continue
+            if raw == "/skills":
+                list_project_skills(workspace)
+                continue
+            if raw == "/mcp":
+                list_mcp_command(workspace)
+                continue
+            if raw == "/permissions":
+                console.print(
+                    "read/search: automatic; write/edit/run_command: approval; "
+                    "sensitive reads (.env, keys, .ssh, .aws, .git): approval; "
+                    "plan mode: read-only tool set."
+                )
                 continue
             if raw.startswith("/new ") or raw.startswith("/resume "):
                 session_id = raw.split(maxsplit=1)[1]
@@ -167,6 +208,7 @@ async def _chat(
                     max_steps=max_steps,
                     cost_budget=cost_budget,
                     workspace=workspace,
+                    agent_profile=agent_profile,
                 )
                 await agent.init()
                 console.print(f"Session switched to [bold]{session_id}[/bold].")
@@ -191,6 +233,9 @@ def run(
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
     cost_budget: float = typer.Option(1.0, "--cost-budget"),
+    agent_profile: str | None = typer.Option(
+        None, "--agent", help="Project agent profile"
+    ),
     json_output: bool = typer.Option(
         False, "--json", help="Print reply and state as JSON."
     ),
@@ -205,6 +250,101 @@ def run(
             max_steps,
             cost_budget,
             json_output,
+            "execute",
+            agent_profile,
+        )
+    )
+
+
+@app.command()
+def plan(
+    task: str = typer.Argument(...),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
+    db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
+    session: str = typer.Option("plan", "--session", "-s"),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    max_steps: int = typer.Option(12, "--max-steps"),
+    cost_budget: float = typer.Option(0.25, "--cost-budget"),
+    output: Path | None = typer.Option(
+        None, "--output", help="Save plan Markdown here"
+    ),
+    agent_profile: str | None = typer.Option(
+        None, "--agent", help="Project agent profile"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print reply and state as JSON."
+    ),
+) -> None:
+    """Inspect and design a task without write or shell tools."""
+    asyncio.run(
+        _run(
+            task,
+            model,
+            db_path,
+            session,
+            workspace,
+            max_steps,
+            cost_budget,
+            json_output,
+            "plan",
+            agent_profile,
+            output,
+        )
+    )
+
+
+@app.command()
+def goal(
+    task: str = typer.Argument(...),
+    plan_first: bool = typer.Option(True, "--plan-first/--execute-now"),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
+    db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
+    session: str = typer.Option("goal", "--session", "-s"),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    max_steps: int = typer.Option(40, "--max-steps"),
+    cost_budget: float = typer.Option(1.0, "--cost-budget"),
+    agent_profile: str | None = typer.Option(
+        None, "--agent", help="Project agent profile"
+    ),
+) -> None:
+    """Start a goal; plan-first is the safe default."""
+    if plan_first:
+        plan_path = project_dir(workspace) / "plans" / f"{session}.md"
+        asyncio.run(
+            _run(
+                task,
+                model,
+                db_path,
+                f"{session}:plan",
+                workspace,
+                min(max_steps, 12),
+                min(cost_budget, 0.25),
+                False,
+                "plan",
+                agent_profile,
+                plan_path,
+            )
+        )
+        console.print(
+            f"[yellow]Plan saved to {plan_path}. Review it, then run:[/yellow]"
+        )
+        console.print(
+            f"aetheris run {task!r} --session {session} --workspace {workspace!r}"
+        )
+        return
+    asyncio.run(
+        _run(
+            task,
+            model,
+            db_path,
+            session,
+            workspace,
+            max_steps,
+            cost_budget,
+            False,
+            "execute",
+            agent_profile,
+            None,
         )
     )
 
@@ -218,6 +358,9 @@ def resume(
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
     cost_budget: float = typer.Option(1.0, "--cost-budget"),
+    agent_profile: str | None = typer.Option(
+        None, "--agent", help="Project agent profile"
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Resume an existing task using the same database and session ID."""
@@ -231,6 +374,8 @@ def resume(
             max_steps,
             cost_budget,
             json_output,
+            "execute",
+            agent_profile,
         )
     )
 
@@ -244,6 +389,9 @@ async def _run(
     max_steps: int,
     cost_budget: float,
     json_output: bool,
+    mode: str = "execute",
+    agent_profile: str | None = None,
+    output: Path | None = None,
 ) -> None:
     agent = _agent(
         model=model,
@@ -252,12 +400,18 @@ async def _run(
         max_steps=max_steps,
         cost_budget=cost_budget,
         workspace=workspace,
+        mode=mode,
+        agent_profile=agent_profile,
     )
     await agent.init()
     try:
         with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
             reply = await agent.chat(expand_file_tags(task))
         state = await agent.memory.load_state()
+        if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(reply + "\n", encoding="utf-8")
+            console.print(f"Plan written to {output}")
         if json_output:
             console.print_json(
                 json.dumps({"reply": reply, "state": _state_payload(state)})
@@ -307,6 +461,153 @@ def skills() -> None:
             skill.description,
         )
     console.print(table)
+
+
+@skill_app.command("create")
+def create_skill_command(
+    name: str = typer.Argument(...),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    description: str = typer.Option(
+        "A project-specific bounded workflow", "--description"
+    ),
+) -> None:
+    """Scaffold a reviewable project skill Markdown file."""
+    try:
+        path = create_skill(workspace, name, description)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Created skill [cyan]{name}[/cyan]: {path}")
+
+
+@skill_app.command("list")
+def list_project_skills(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+) -> None:
+    """List project-local skills without loading them into the model."""
+    root = project_dir(workspace) / "skills"
+    paths = sorted(root.glob("*/SKILL.md")) if root.exists() else []
+    if not paths:
+        console.print("[dim]No project skills.[/dim]")
+        return
+    for path in paths:
+        console.print(f"[cyan]{path.parent.name}[/cyan]  {path}")
+
+
+@agent_app.command("create")
+def create_agent_command(
+    name: str = typer.Argument(...),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    description: str = typer.Option("A project-specific specialist", "--description"),
+) -> None:
+    """Scaffold a reviewable project agent profile."""
+    try:
+        path = create_agent(workspace, name, description)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Created agent [cyan]{name}[/cyan]: {path}")
+
+
+@agent_app.command("list")
+def list_project_agents(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+) -> None:
+    """List project-local agent profiles."""
+    root = project_dir(workspace) / "agents"
+    paths = sorted(root.glob("*.md")) if root.exists() else []
+    if not paths:
+        console.print("[dim]No project agents.[/dim]")
+        return
+    for path in paths:
+        console.print(f"[cyan]{path.stem}[/cyan]  {path}")
+
+
+@mcp_app.command("add")
+def add_mcp_command(
+    name: str = typer.Argument(...),
+    command: str = typer.Option(..., "--command", help="Local stdio server command"),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    env: list[str] | None = typer.Option(
+        None, "--env", help="Allowed env variable name; repeatable"
+    ),
+) -> None:
+    """Register a local MCP stdio server without starting it."""
+    try:
+        path = add_mcp_server(workspace, name, command, env=env)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Registered MCP server [cyan]{name}[/cyan] in {path}")
+
+
+@mcp_app.command("list")
+def list_mcp_command(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+) -> None:
+    """List configured MCP servers; this does not connect to them."""
+    try:
+        servers = load_mcp_config(workspace).get("mcpServers", {})
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not servers:
+        console.print("[dim]No MCP servers configured.[/dim]")
+        return
+    for name, config in servers.items():
+        command = " ".join(
+            [str(config.get("command", "")), *map(str, config.get("args", []))]
+        ).strip()
+        console.print(
+            f"[cyan]{name}[/cyan]  {'enabled' if config.get('enabled', True) else 'disabled'}  {command}"
+        )
+
+
+@mcp_app.command("validate")
+def validate_mcp_command(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+) -> None:
+    """Validate MCP JSON and command metadata without launching servers."""
+    config = load_mcp_config(workspace)
+    for name, server in config.get("mcpServers", {}).items():
+        if not server.get("command"):
+            raise typer.BadParameter(f"MCP server '{name}' has no command")
+        if not isinstance(server.get("args", []), list):
+            raise typer.BadParameter(f"MCP server '{name}' args must be a list")
+    console.print(
+        f"[green]Valid MCP configuration:[/green] {len(config.get('mcpServers', {}))} server(s)"
+    )
+
+
+@mcp_app.command("test")
+def test_mcp_command(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+) -> None:
+    """Connect to each enabled local MCP server and list its tools."""
+
+    async def probe() -> list[tuple[str, list[str], str | None]]:
+        results = []
+        for server in configured_servers(workspace):
+            try:
+                tools = await MCPClient(
+                    server, str(Path(workspace).resolve())
+                ).list_tools()
+                results.append(
+                    (server.name, [str(item.get("name")) for item in tools], None)
+                )
+            except (MCPConnectionError, OSError, ValueError) as exc:
+                results.append((server.name, [], str(exc)))
+        return results
+
+    results = asyncio.run(probe())
+    if not results:
+        console.print("[dim]No enabled MCP servers configured.[/dim]")
+        return
+    failed = False
+    for name, tools, error in results:
+        if error:
+            failed = True
+            console.print(f"[red]FAIL[/red] {name}: {error}")
+        else:
+            console.print(f"[green]OK[/green] {name}: {', '.join(tools) or 'no tools'}")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command("providers")

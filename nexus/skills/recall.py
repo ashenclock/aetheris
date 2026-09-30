@@ -26,7 +26,11 @@ class RecallSkill(BaseSkill):
         return RecallSchema
 
     async def execute(self, **kwargs) -> str:
-        root = self.workspace_root / ".aetheris/wiki" if self.workspace_root else ".aetheris/wiki"
+        root = (
+            self.workspace_root / ".aetheris/wiki"
+            if self.workspace_root
+            else ".aetheris/wiki"
+        )
         matches = KnowledgeStore(root).recall(kwargs["query"], kwargs.get("limit", 5))
         if not matches:
             return "No durable knowledge matched the query."
