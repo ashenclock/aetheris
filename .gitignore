@@ -18,6 +18,7 @@ credentials.json
 *.db
 *.sqlite
 *.sqlite3
+*.session.lock
 aetheris_memory.db
 memory.db
 .aetheris/

@@ -252,6 +252,10 @@ class Agent:
         await self.policy.close()
 
     async def chat(self, user_input: str) -> str:
+        with self.memory.session_lock():
+            return await self._chat_locked(user_input)
+
+    async def _chat_locked(self, user_input: str) -> str:
         state = await self._ensure_state(user_input)
         await self.memory.recover_pending_tool_calls(state)
         await self.memory.add_message("user", user_input)

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
+import os
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
 from .state import TaskState
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+
+class SessionBusyError(RuntimeError):
+    """Raised when another process is already running this task session."""
 
 
 class SessionMemory:
@@ -14,6 +28,45 @@ class SessionMemory:
     def __init__(self, db_path: str = "memory.db", session_id: str = "default"):
         self.db_path = db_path
         self.session_id = session_id
+
+    @contextmanager
+    def session_lock(self):
+        """Hold a crash-released OS lock for one session across processes."""
+        if self.db_path == ":memory:":
+            yield
+            return
+
+        database = Path(self.db_path).expanduser().resolve()
+        session_hash = hashlib.sha256(self.session_id.encode()).hexdigest()[:20]
+        lock_path = database.with_name(f"{database.name}.{session_hash}.session.lock")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, flags, 0o600)
+        locked = False
+        try:
+            if os.name == "nt":
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise SessionBusyError(
+                    f"Session '{self.session_id}' is already active."
+                ) from exc
+            raise
+        try:
+            yield
+        finally:
+            if locked:
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     async def init_db(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:

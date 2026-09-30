@@ -201,8 +201,9 @@ completion tokens. Latency is machine-dependent.
   pricing cannot produce a hard cost guarantee.
 - Missing task state or corrupt SQLite JSON is an understandable startup error,
   but there is no repair tool for arbitrary database corruption.
-- Concurrent resumes of the same session across separate processes are not
-  serialized. The API's in-process lock does not cover another CLI or replica.
+- An OS-level lock rejects concurrent resumes of the same session across
+  processes on a shared local filesystem. It is not a distributed lock for
+  network filesystems or replicas with separate disks.
 - A crash while a tool is executing is recoverable as an ambiguous interrupted
   call, not as proof that the external side effect did not happen.
 - Cancellation during a model request or tool execution checkpoints a paused

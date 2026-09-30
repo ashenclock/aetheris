@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from nexus.api import serve as serve_api
 from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
-from nexus.core.memory import SessionMemory
+from nexus.core.memory import SessionBusyError, SessionMemory
 from nexus.core.state import TaskState
 from nexus.mcp import MCPConnectionError, MCPClient, configured_servers
 from nexus.providers import discover_providers, provider_for_model
@@ -216,7 +216,13 @@ async def _chat(
                 continue
 
             with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
-                reply = await agent.chat(expand_file_tags(raw))
+                try:
+                    reply = await agent.chat(expand_file_tags(raw))
+                except SessionBusyError as exc:
+                    console.print(
+                        f"[yellow]{exc} Check status or retry later.[/yellow]"
+                    )
+                    continue
             console.print(
                 Panel(Markdown(reply), title="Aetheris", border_style="green")
             )
@@ -440,8 +446,15 @@ async def _run(
     )
     await agent.init()
     try:
-        with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
-            reply = await agent.chat(expand_file_tags(task))
+        try:
+            with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
+                reply = await agent.chat(expand_file_tags(task))
+        except SessionBusyError as exc:
+            if json_output:
+                console.print_json(json.dumps({"error": str(exc), "session": session}))
+            else:
+                console.print(f"[yellow]{exc} Check status or retry later.[/yellow]")
+            raise typer.Exit(code=2) from exc
         state = await agent.memory.load_state()
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)

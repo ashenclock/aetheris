@@ -1,6 +1,6 @@
 import pytest
 
-from nexus.core.memory import SessionMemory
+from nexus.core.memory import SessionBusyError, SessionMemory
 from nexus.core.state import TaskState, TaskStatus
 
 
@@ -116,3 +116,20 @@ async def test_tool_result_and_state_share_one_checkpoint(temp_db):
     assert history[0]["tool_call_id"] == "call-1"
     assert restored is not None and restored.tool_calls == 1
     assert latest is not None and latest[0].tool_calls == 1
+
+
+def test_session_lock_rejects_another_active_owner(temp_db):
+    memory = SessionMemory(db_path=temp_db, session_id="locked-task")
+    other_session = SessionMemory(db_path=temp_db, session_id="other-task")
+
+    with memory.session_lock():
+        with pytest.raises(SessionBusyError, match="already active"):
+            with SessionMemory(
+                db_path=temp_db, session_id="locked-task"
+            ).session_lock():
+                pass
+        with other_session.session_lock():
+            pass
+
+    with memory.session_lock():
+        pass

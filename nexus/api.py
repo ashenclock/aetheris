@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from .core.agent import Agent
-from .core.memory import SessionMemory
+from .core.memory import SessionBusyError, SessionMemory
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,8 @@ class AetherisRequestHandler(BaseHTTPRequestHandler):
             result = _run(self.runtime.run_task(body))
         except AetherisAPIError as exc:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except SessionBusyError as exc:
+            self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
         except Exception as exc:
             request_id = secrets.token_hex(8)
             logger.exception("API request %s failed: %s", request_id, exc)
