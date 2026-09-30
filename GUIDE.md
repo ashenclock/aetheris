@@ -189,6 +189,10 @@ aetheris resume web-demo \
   --max-steps 15
 ```
 
+When resuming a paused task, a larger `--max-steps` value extends the persisted
+step allowance; a smaller value never reduces it. The persisted cost budget is
+not silently increased by resume.
+
 ## 4. Add a local container build
 
 Only after reviewing the generated files, ask for a container artifact:

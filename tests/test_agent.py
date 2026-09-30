@@ -87,7 +87,9 @@ def test_agent_can_expose_a_bounded_read_only_tool_set(tmp_path):
         enabled_skill_names={"read_file", "search_code"},
     )
     assert set(agent.skills) == {"read_file", "search_code"}
-    assert all(skill.workspace_root == tmp_path.resolve() for skill in agent.skills.values())
+    assert all(
+        skill.workspace_root == tmp_path.resolve() for skill in agent.skills.values()
+    )
 
 
 def test_codex_model_selects_responses_api_adapter(tmp_path):
@@ -208,6 +210,53 @@ async def test_failed_model_request_can_resume_same_task(temp_db):
 
 
 @pytest.mark.asyncio
+async def test_resume_can_extend_step_limit_without_reducing_it(temp_db, tmp_path):
+    target = tmp_path / "fixture.txt"
+    target.write_text("safe", encoding="utf-8")
+    call = SimpleNamespace(
+        id="limit-call",
+        function=SimpleNamespace(
+            name="read_file", arguments=f'{{"filepath":"{target}"}}'
+        ),
+    )
+    first = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="extend-limit",
+        max_steps=1,
+    )
+    await first.init()
+    with patch(
+        "nexus.core.agent.acompletion",
+        new_callable=AsyncMock,
+        return_value=response(tool_calls=[call]),
+    ):
+        reply = await first.chat("Read the fixture")
+    paused = await first.memory.load_state()
+    assert "paused" in reply.lower()
+    assert paused is not None and paused.max_steps == 1
+    await first.close()
+
+    second = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="extend-limit",
+        max_steps=3,
+    )
+    await second.init()
+    with patch(
+        "nexus.core.agent.acompletion",
+        new_callable=AsyncMock,
+        return_value=response("Recovered"),
+    ):
+        assert await second.chat("Continue") == "Recovered"
+    resumed = await second.memory.load_state()
+    assert resumed is not None
+    assert resumed.max_steps == 3
+    await second.close()
+
+
+@pytest.mark.asyncio
 async def test_malformed_model_response_pauses_with_recoverable_state(temp_db):
     agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="bad-response")
     await agent.init()
@@ -231,7 +280,9 @@ async def test_malformed_model_response_pauses_with_recoverable_state(temp_db):
 
 @pytest.mark.asyncio
 async def test_empty_model_response_pauses_instead_of_claiming_completion(temp_db):
-    agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="empty-response")
+    agent = Agent(
+        model_name="mock/offline", db_path=temp_db, session_id="empty-response"
+    )
     await agent.init()
 
     with patch(

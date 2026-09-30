@@ -208,6 +208,11 @@ gates and runtime budgets remain authoritative.
 
 `write_file`, `edit_file`, and shell execution require an interactive approval. Approval is a user decision gate; it is not an OS sandbox. Shell commands run with the current process user's permissions. The repository does not claim protection against malicious commands. Use a disposable container or a separate OS account for untrusted repositories.
 
+`read_file` also asks for approval before reading common sensitive paths such as
+`.env`, private keys, `.ssh`, `.aws`, or `.git`. This is a narrow credential
+boundary, not a guarantee that arbitrary secrets are detected; do not run an
+untrusted agent with valuable credentials in its environment.
+
 ## Offline evaluation
 
 The checked-in task set covers symbol search, file reading, a small edit followed by a unit test, one controlled tool failure and retry, an approval denial, recovery from an interrupted tool call, and durable knowledge recall.

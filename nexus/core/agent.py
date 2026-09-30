@@ -281,6 +281,10 @@ class Agent:
         state = await self.memory.load_state()
         resumable = {TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.FAILED}
         if state and state.status in resumable:
+            # A resume may extend a previously reached step limit, but never
+            # reduces it. Cost budgets remain authoritative in persisted state.
+            if self.max_steps > state.max_steps:
+                state.max_steps = self.max_steps
             state.status = TaskStatus.RUNNING
             self.tracker.restore(state)
             await self.memory.checkpoint(state, "Task resumed.")
