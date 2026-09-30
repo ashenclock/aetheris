@@ -28,6 +28,11 @@ class ReadFileSkill(BaseSkill):
     def parameters_schema(self) -> type[BaseModel]:
         return ReadFileSchema
 
+    @property
+    def requires_confirmation(self) -> bool:
+        """Run the path-aware confirmation hook on every read request."""
+        return True
+
     @classmethod
     def _is_sensitive(cls, filepath: Path) -> bool:
         if filepath.name in cls._SENSITIVE_NAMES:
