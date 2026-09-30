@@ -87,7 +87,7 @@ def _agent(
 
 @app.command()
 def chat(
-    model: str = typer.Option("ollama/llama3", "--model", "-m"),
+    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("default", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -166,7 +166,7 @@ async def _chat(
 @app.command()
 def run(
     task: str = typer.Argument(...),
-    model: str = typer.Option("ollama/llama3", "--model", "-m"),
+    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("run", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -192,7 +192,7 @@ def run(
 def resume(
     session: str = typer.Argument(..., help="Existing session ID to continue."),
     instruction: str = typer.Argument("Continue the task.", metavar="INSTRUCTION"),
-    model: str = typer.Option("ollama/llama3", "--model", "-m"),
+    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
@@ -343,7 +343,7 @@ def serve(
     port: int = typer.Option(8787, "--port"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
-    model: str = typer.Option("ollama/llama3", "--model", "-m"),
+    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
     max_steps: int = typer.Option(12, "--max-steps"),
     cost_budget: float = typer.Option(0.25, "--cost-budget"),
     read_only: bool = typer.Option(True, "--read-only/--allow-write"),
