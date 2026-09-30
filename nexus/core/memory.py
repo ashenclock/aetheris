@@ -36,28 +36,33 @@ class SessionMemory:
             yield
             return
 
-        database = Path(self.db_path).expanduser().resolve()
+        requested_database = Path(self.db_path).expanduser()
+        database = requested_database.resolve()
+        if database.exists() and database.stat().st_nlink > 1:
+            raise ValueError(
+                "SQLite databases with multiple hard links cannot use session locks."
+            )
         session_hash = hashlib.sha256(self.session_id.encode()).hexdigest()[:20]
         lock_path = database.with_name(f"{database.name}.{session_hash}.session.lock")
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags, 0o600)
         locked = False
         try:
-            if os.name == "nt":
-                if os.fstat(descriptor).st_size == 0:
-                    os.write(descriptor, b"\0")
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-            else:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                raise SessionBusyError(
-                    f"Session '{self.session_id}' is already active."
-                ) from exc
-            raise
-        try:
+            try:
+                if os.name == "nt":
+                    if os.fstat(descriptor).st_size == 0:
+                        os.write(descriptor, b"\0")
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise SessionBusyError(
+                        f"Session '{self.session_id}' is already active."
+                    ) from exc
+                raise
             yield
         finally:
             if locked:

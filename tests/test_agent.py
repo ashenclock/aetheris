@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from nexus.core.agent import Agent
+from nexus.core.memory import SessionBusyError
 from nexus.core.state import TaskState, TaskStatus
 
 
@@ -33,6 +34,43 @@ async def test_agent_initialization_persists_system_prompt(temp_db):
     assert len(history) == 1
     assert history[0]["role"] == "system"
     await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_concurrent_same_session_without_mutating_history(temp_db):
+    first = Agent(
+        model_name="mock/offline", db_path=temp_db, session_id="concurrent-task"
+    )
+    second = Agent(
+        model_name="mock/offline", db_path=temp_db, session_id="concurrent-task"
+    )
+    await first.init()
+    await second.init()
+    entered_model = asyncio.Event()
+    finish_model = asyncio.Event()
+
+    async def waiting_response(**_kwargs):
+        entered_model.set()
+        await finish_model.wait()
+        return response("Complete")
+
+    with patch("nexus.core.agent.acompletion", side_effect=waiting_response):
+        active = asyncio.create_task(first.chat("first instruction"))
+        try:
+            await asyncio.wait_for(entered_model.wait(), timeout=3)
+            with pytest.raises(SessionBusyError, match="already active"):
+                await second.chat("duplicate instruction")
+            history = await first.memory.get_history()
+            assert [
+                message.get("content")
+                for message in history
+                if message["role"] == "user"
+            ] == ["first instruction"]
+        finally:
+            finish_model.set()
+            await active
+    await first.close()
+    await second.close()
 
 
 @pytest.mark.asyncio

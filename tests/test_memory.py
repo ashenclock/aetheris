@@ -1,7 +1,17 @@
+import multiprocessing
+import os
+
 import pytest
 
 from nexus.core.memory import SessionBusyError, SessionMemory
 from nexus.core.state import TaskState, TaskStatus
+
+
+def _hold_session_lock(db_path, session_id, ready, release):
+    memory = SessionMemory(db_path=db_path, session_id=session_id)
+    with memory.session_lock():
+        ready.set()
+        release.wait(timeout=10)
 
 
 @pytest.fixture
@@ -118,18 +128,99 @@ async def test_tool_result_and_state_share_one_checkpoint(temp_db):
     assert latest is not None and latest[0].tool_calls == 1
 
 
-def test_session_lock_rejects_another_active_owner(temp_db):
-    memory = SessionMemory(db_path=temp_db, session_id="locked-task")
-    other_session = SessionMemory(db_path=temp_db, session_id="other-task")
-
-    with memory.session_lock():
+def test_session_lock_serializes_processes_and_recovers_after_owner_exit(temp_db):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_session_lock,
+        args=(temp_db, "locked-task", ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=10)
         with pytest.raises(SessionBusyError, match="already active"):
             with SessionMemory(
                 db_path=temp_db, session_id="locked-task"
             ).session_lock():
                 pass
-        with other_session.session_lock():
+        with SessionMemory(db_path=temp_db, session_id="other-task").session_lock():
             pass
+    finally:
+        release.set()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+    assert process.exitcode == 0
+    with SessionMemory(db_path=temp_db, session_id="locked-task").session_lock():
+        pass
+
+
+def test_session_lock_is_released_when_owner_process_crashes(temp_db):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_session_lock,
+        args=(temp_db, "crashed-task", ready, release),
+    )
+    process.start()
+    assert ready.wait(timeout=10)
+    process.terminate()
+    process.join(timeout=10)
+
+    assert process.exitcode is not None
+    with SessionMemory(db_path=temp_db, session_id="crashed-task").session_lock():
+        pass
+
+
+def test_session_lock_closes_every_rejected_descriptor(temp_db, monkeypatch):
+    from nexus.core import memory as memory_module
+
+    closed = []
+    real_close = os.close
+    monkeypatch.setattr(
+        memory_module.os,
+        "close",
+        lambda descriptor: (closed.append(descriptor), real_close(descriptor))[1],
+    )
+    memory = SessionMemory(db_path=temp_db, session_id="repeated-task")
 
     with memory.session_lock():
-        pass
+        for _ in range(20):
+            with pytest.raises(SessionBusyError):
+                with SessionMemory(
+                    db_path=temp_db, session_id="repeated-task"
+                ).session_lock():
+                    pass
+
+    assert len(closed) == 21
+
+
+def test_session_lock_resolves_database_symlink_alias(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    database.touch()
+    alias = tmp_path / "alias.sqlite3"
+    alias.symlink_to(database)
+
+    with SessionMemory(db_path=str(database), session_id="same-task").session_lock():
+        with pytest.raises(SessionBusyError):
+            with SessionMemory(
+                db_path=str(alias), session_id="same-task"
+            ).session_lock():
+                pass
+
+
+def test_session_lock_rejects_database_hardlink_alias(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    database.touch()
+    alias = tmp_path / "alias.sqlite3"
+    os.link(database, alias)
+
+    with pytest.raises(ValueError, match="multiple hard links"):
+        with SessionMemory(
+            db_path=str(database), session_id="same-task"
+        ).session_lock():
+            pass

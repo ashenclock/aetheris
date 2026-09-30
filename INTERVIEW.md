@@ -175,15 +175,16 @@ real skills. It measures status, steps, tool calls, failures, recovery,
 approval pauses, tokens, latency, and checkpoints. Mock cost is intentionally
 `null`; these results test runtime control flow, not model quality.
 
-The measured run on this checkout was 7/7 successful tasks, 12 tool calls, 6
-tool failures, 2 recovery cases, 1 approval pause, 170 prompt tokens, and 85
-completion tokens. Latency is machine-dependent.
+The latest measured run was 7/7 successful tasks, 10 tool calls, 3 controlled
+tool failures, 2 recovery cases, 1 approval pause, 150 prompt tokens, and 75
+completion tokens. Latency is machine-dependent. A separate multiprocessing
+test verifies same-session exclusion and lock release after process termination.
 
 ## Main design trade-offs
 
 | Choice | Why it fits this project | What it gives up |
 | --- | --- | --- |
-| SQLite over Redis/Postgres | Local transactions and easy inspection | One process and one local database file |
+| SQLite over Redis/Postgres | Local transactions, easy inspection, same-session OS locking | One machine; not distributed state or coordination |
 | Markdown over a vector database | Reviewable knowledge with no service | Lexical search misses semantic matches |
 | Custom runtime over LangGraph | The control flow stays visible in a few Python files | Fewer built-in integrations and less distributed orchestration |
 | Deterministic limits over model decisions | Numeric policy stays enforceable | The model can still choose poor actions within the limits |
@@ -432,7 +433,9 @@ rate, and spend controls above.
 The CLI has a small local stdio MCP adapter and an explicit `mcp test` command.
 The hosted demo keeps using the direct GitHub connector so it does not spawn
 arbitrary project processes or introduce a second credential boundary. Tool
-descriptions and server instructions remain untrusted input.
+descriptions and server instructions remain untrusted input. POSIX cleanup
+terminates the MCP process group; Windows cleanup currently targets the direct
+server process only.
 
 ## ReAct, sub-agents, and knowledge
 
