@@ -79,3 +79,18 @@ def test_archive_validation_bounds_expanded_size(tmp_path):
 
     with pytest.raises(GitHubRepositoryError, match="extraction file or size limit"):
         _validate_archive_members([member], tmp_path, max_extracted_bytes=10)
+
+
+def test_archive_validation_bounds_all_entries_including_directories(tmp_path):
+    members = [
+        _member(f"repo/directory-{index}/", kind="directory") for index in range(3)
+    ]
+
+    with pytest.raises(GitHubRepositoryError, match="too many entries"):
+        _validate_archive_members(members, tmp_path, max_members=2)
+
+
+def test_archive_validation_accepts_a_streaming_iterator(tmp_path):
+    members = (_member(f"repo/file-{index}.txt") for index in range(3))
+
+    _validate_archive_members(members, tmp_path, max_members=3)

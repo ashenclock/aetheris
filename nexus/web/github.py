@@ -4,6 +4,7 @@ import io
 import json
 import tarfile
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 MAX_ARCHIVE_FILES = 10_000
+MAX_ARCHIVE_MEMBERS = 20_000
 MAX_EXTRACTED_BYTES = 100 * 1024 * 1024
 
 
@@ -25,17 +27,22 @@ class GitHubRepository:
 
 
 def _validate_archive_members(
-    members: list[tarfile.TarInfo],
+    members: Iterable[tarfile.TarInfo],
     extraction_root: Path,
     *,
     max_files: int = MAX_ARCHIVE_FILES,
+    max_members: int = MAX_ARCHIVE_MEMBERS,
     max_extracted_bytes: int = MAX_EXTRACTED_BYTES,
 ) -> None:
-    """Reject unsafe archives and bound their expanded file count and size."""
+    """Reject unsafe archives and bound member count and expanded size."""
     files = 0
     total_size = 0
+    member_count = 0
     root = extraction_root.resolve()
     for member in members:
+        member_count += 1
+        if member_count > max_members:
+            raise GitHubRepositoryError("GitHub archive contains too many entries.")
         target = (extraction_root / member.name).resolve()
         if not target.is_relative_to(root):
             raise GitHubRepositoryError("GitHub archive contains an unsafe path.")
@@ -138,8 +145,9 @@ def download_public_repository(
     extraction_root = Path(temporary.name) / "repository"
     extraction_root.mkdir()
     try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r|gz") as handle:
+            _validate_archive_members(handle, extraction_root)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as handle:
-            _validate_archive_members(handle.getmembers(), extraction_root)
             handle.extractall(extraction_root)
     except (GitHubRepositoryError, tarfile.TarError, OSError) as exc:
         temporary.cleanup()

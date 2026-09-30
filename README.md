@@ -76,11 +76,11 @@ The repository also includes a small hosted-demo surface in
 `streamlit_app.py`. It downloads a bounded archive of a public GitHub
 repository into a temporary workspace, starts Aetheris with the same runtime,
 and exposes only read-only tools (`list_directory`, `read_file`, `search_code`,
-and `recall`). Downloads are capped at 50 MiB compressed and 100 MiB / 10,000
-regular files when extracted; archive traversal, links, and special files are
-rejected. The UI shows the answer, authoritative task state, checkpoint
-counters, and the persisted tool protocol. It does not expose shell, file
-writes, edits, or Git pushes.
+and `recall`). Downloads are capped at 50 MiB compressed, 20,000 archive
+entries, and 100 MiB / 10,000 regular files when extracted; archive traversal,
+links, and special files are rejected. The UI shows the answer, authoritative
+task state, checkpoint counters, and the persisted tool protocol. It does not
+expose shell, file writes, edits, or Git pushes.
 
 Install and run it locally:
 
@@ -108,8 +108,12 @@ For bounded live smoke tests, use `python evals/providers.py --live`; without
 skipped rather than treated as successful tests.
 
 For Streamlit Community Cloud, deploy `streamlit_app.py` from the repository's
-GitHub branch, keep `requirements.txt` at the repository root, and add the
-provider key in Streamlit Secrets. Never commit `.streamlit/secrets.toml`.
+GitHub branch and keep `requirements.txt` at the repository root. Never commit
+`.streamlit/secrets.toml`. **Do not add a paid provider key to an unauthenticated
+public deployment:** each visitor can trigger provider spend, and the per-task
+budget is not a global quota. Keep the app private or place authentication,
+rate limits, and an aggregate provider-side spend limit in front of it. The
+model is selected by the server's `AETHERIS_MODEL` setting, not by visitors.
 
 This demo uses a direct GitHub archive connector rather than a local MCP
 process. Aetheris can connect to project-local stdio MCP servers for the CLI,
@@ -376,6 +380,7 @@ why multiple replicas require shared state first.
 ## Limitations
 
 - Aetheris is a single-process, local-first prototype. SQLite and Markdown are not shared across workers.
+- Concurrent resumes of the same session from separate processes are not serialized; do not run multiple workers against the same task database.
 - A hard cost ceiling cannot be guaranteed: providers may not expose a usable estimate, and one model response can cross the threshold before execution is paused. The step ceiling is enforced regardless.
 - Approval does not isolate files, processes, or network access. There is no container sandbox.
 - Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.
@@ -386,6 +391,9 @@ why multiple replicas require shared state first.
   MCP metadata.
 - Project agent profiles and skills guide the model but are not a second policy
   engine. Runtime checks and approvals remain authoritative.
+- The hosted Streamlit page has no built-in authentication or aggregate spend
+  quota. Do not expose paid provider credentials to an unauthenticated public
+  deployment.
 
 ## License
 

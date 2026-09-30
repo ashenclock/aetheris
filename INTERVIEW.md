@@ -201,6 +201,8 @@ completion tokens. Latency is machine-dependent.
   pricing cannot produce a hard cost guarantee.
 - Missing task state or corrupt SQLite JSON is an understandable startup error,
   but there is no repair tool for arbitrary database corruption.
+- Concurrent resumes of the same session across separate processes are not
+  serialized. The API's in-process lock does not cover another CLI or replica.
 - A crash while a tool is executing is recoverable as an ambiguous interrupted
   call, not as proof that the external side effect did not happen.
 - Cancellation during a model request or tool execution checkpoints a paused
@@ -210,6 +212,8 @@ completion tokens. Latency is machine-dependent.
 - The HTTP API is single-tenant and read-only because it has no remote approval
   flow. Network binds require a bearer token. A shared token does not provide
   per-user session ownership or multi-tenant isolation.
+- The hosted Streamlit UI has no authentication or aggregate spend quota; a
+  paid provider key must not be exposed through an unauthenticated public app.
 - `search_code` intentionally uses literal matching and skips hidden,
   generated, symlinked, and files larger than 1 MB; it returns at most 200
   matches. This avoids arbitrary regex backtracking and accidental traversal
@@ -411,13 +415,18 @@ streamlit run streamlit_app.py
 docker build -f Dockerfile.streamlit -t aetheris-web:local .
 ```
 
-The hosted demo downloads a public GitHub archive with compressed and expanded
-size/file-count limits, rejects traversal, links, and special files, uses an
-isolated temporary workspace, and exposes only read-only tools. It demonstrates
-the runtime and protocol without pretending to sandbox arbitrary shell
-execution.
+The hosted demo streams validation of public GitHub archives with compressed,
+entry-count, and expanded size/file-count limits, rejects traversal, links,
+and special files, uses an isolated temporary workspace, and exposes only
+read-only tools. It demonstrates the runtime and protocol without pretending
+to sandbox arbitrary shell execution.
+
+Do not publish it with paid provider secrets unless access control, rate
+limits, and aggregate spend limits are supplied externally; its task budget is
+not a per-visitor/global quota.
 For Community Cloud, `requirements.txt` and `streamlit_app.py` are at the
-repository root and credentials belong in platform secrets.
+repository root. Only add secrets after the app is protected by the access,
+rate, and spend controls above.
 
 The CLI has a small local stdio MCP adapter and an explicit `mcp test` command.
 The hosted demo keeps using the direct GitHub connector so it does not spawn

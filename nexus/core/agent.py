@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -704,13 +705,25 @@ class Agent:
         serialized: list[dict[str, Any]] = []
         for call in tool_calls or []:
             function = getattr(call, "function", None)
+            raw_arguments = getattr(function, "arguments", "{}")
+            try:
+                arguments = (
+                    raw_arguments
+                    if isinstance(raw_arguments, str)
+                    else json.dumps(raw_arguments)
+                )
+            except (TypeError, ValueError):
+                arguments = "null"
+            call_id = getattr(call, "id", None)
             serialized.append(
                 {
-                    "id": getattr(call, "id", "tool-call"),
+                    "id": call_id
+                    if isinstance(call_id, str) and call_id
+                    else uuid.uuid4().hex,
                     "type": "function",
                     "function": {
-                        "name": getattr(function, "name", ""),
-                        "arguments": getattr(function, "arguments", "{}"),
+                        "name": getattr(function, "name", "") or "",
+                        "arguments": arguments,
                     },
                 }
             )

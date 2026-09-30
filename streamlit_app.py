@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import secrets
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from nexus.skills.web_search import WebSearchSkill
 
 
 READ_ONLY_TOOLS = {"list_directory", "read_file", "search_code", "recall"}
+logger = logging.getLogger(__name__)
 
 
 def _secret_or_env(name: str) -> str | None:
@@ -127,9 +130,8 @@ if "messages" not in st.session_state:
 
 with st.sidebar:
     st.header("Demo controls")
-    model = st.text_input(
-        "Model", value=os.getenv("AETHERIS_MODEL", "openai/gpt-4o-mini")
-    )
+    model = os.getenv("AETHERIS_MODEL", "openai/gpt-4o-mini")
+    st.caption(f"Configured model: `{model}`")
     max_steps = st.slider("Maximum steps", min_value=1, max_value=12, value=6)
     st.caption(
         "The hosted demo exposes only read-only tools. Shell, write, edit, and push operations are intentionally unavailable."
@@ -266,10 +268,14 @@ if st.session_state.repo_root:
                     st.session_state.messages.append(
                         {"role": "assistant", "content": answer}
                     )
-                except Exception as exc:
-                    st.error(f"The model request failed: {exc}")
+                except Exception:
+                    request_id = secrets.token_hex(6)
+                    logger.exception("Streamlit agent request %s failed", request_id)
+                    st.error("The model request failed.")
                     st.caption(
-                        "Configure the provider key in Streamlit Secrets or the environment before using the live GitHub analysis."
+                        f"Reference: {request_id}. Check server logs for details. "
+                        "Configure the provider key in Streamlit Secrets or the "
+                        "environment before using live analysis."
                     )
 else:
     st.subheader("Start with the deterministic path")
