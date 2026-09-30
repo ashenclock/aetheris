@@ -308,7 +308,7 @@ why multiple replicas require shared state first.
 - Approval does not isolate files, processes, or network access. There is no container sandbox.
 - Offline evaluation checks control flow with scripted responses. It does not measure real-model task success, code quality, or comparative performance.
 - A long run still depends on the model's ability to choose useful actions. Checkpoints preserve progress; they do not guarantee completion.
-- A malformed model response pauses the task with a checkpoint, but recovery still depends on a later valid response.
+- A malformed or empty model response pauses the task with a checkpoint, but recovery still depends on a later valid response.
 
 ## License
 

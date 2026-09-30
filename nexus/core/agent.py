@@ -168,6 +168,11 @@ class Agent:
                     "max_children": self.max_subagents,
                 }
             )
+            delegate_skill = self.skills.get("delegate_task")
+            if isinstance(delegate_skill, DelegateTaskSkill):
+                # Child session numbering is durable too; otherwise a resumed
+                # parent could overwrite an earlier child transcript.
+                delegate_skill._delegation_count = state.subagent_children_started
 
     async def close(self) -> None:
         await self.policy.close()
@@ -237,6 +242,14 @@ class Agent:
 
             if not tool_calls:
                 reply = message.content or ""
+                if not reply.strip():
+                    error = "Empty model response; task paused and can be resumed."
+                    state.record_step(
+                        "model_response", success=False, error=error, is_tool_call=False
+                    )
+                    state.status = TaskStatus.PAUSED
+                    await self.memory.checkpoint(state, error)
+                    return self._pause_message(state, error)
                 await self.memory.add_message("assistant", reply)
                 state.status = TaskStatus.COMPLETED
                 await self.memory.checkpoint(state, "Task completed.")
@@ -294,6 +307,8 @@ class Agent:
             return await HeuristicPolicy().decide(state)
 
     async def _request_model(self, history: list[dict[str, Any]]) -> Any:
+        # Keep provider-specific wire formats behind this boundary. The rest
+        # of the runtime only handles the normalized chat/tool-call shape.
         if not self._uses_responses_api():
             return await acompletion(
                 model=self.model_name,
@@ -399,6 +414,8 @@ class Agent:
     async def _execute_tool_call(
         self, tool_call: dict[str, Any], state: TaskState
     ) -> None:
+        # A tool result is persisted with the same call ID as the assistant
+        # request, so a crash cannot turn an observation into a fake user turn.
         call_id = tool_call["id"]
         function = tool_call["function"]
         name = function["name"]

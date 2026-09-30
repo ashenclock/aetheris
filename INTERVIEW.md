@@ -152,7 +152,7 @@ completion tokens. Latency is machine-dependent.
 ## Failure modes and honest answers
 
 - A model request error pauses the task and preserves the session for resume.
-- A malformed model response pauses with a checkpoint. The next run needs a
+- A malformed or empty model response pauses with a checkpoint. The next run needs a
   valid provider response.
 - Unknown tools, invalid JSON arguments, command failures, and denied approvals
   become tool failures. Three consecutive failures pause the task.

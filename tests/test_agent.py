@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from nexus.core.agent import Agent
-from nexus.core.state import TaskStatus
+from nexus.core.state import TaskState, TaskStatus
 
 
 def response(content=None, tool_calls=None):
@@ -227,6 +227,46 @@ async def test_malformed_model_response_pauses_with_recoverable_state(temp_db):
     assert state.last_action == "model_response"
     assert state.step_count == 1
     await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_model_response_pauses_instead_of_claiming_completion(temp_db):
+    agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="empty-response")
+    await agent.init()
+
+    with patch(
+        "nexus.core.agent.acompletion",
+        new_callable=AsyncMock,
+        return_value=response(""),
+    ):
+        reply = await agent.chat("Inspect the repository")
+
+    state = await agent.memory.load_state()
+    assert "empty model response" in reply.lower()
+    assert state is not None
+    assert state.status == TaskStatus.PAUSED
+    assert state.last_action == "model_response"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_child_session_numbering(temp_db):
+    first = Agent(model_name="mock/offline", db_path=temp_db, session_id="parent")
+    await first.init()
+    await first.memory.checkpoint(
+        TaskState(
+            session_id="parent",
+            goal="Review a repository",
+            subagent_children_started=2,
+        ),
+        "Persisted after two child sessions.",
+    )
+    await first.close()
+
+    resumed = Agent(model_name="mock/offline", db_path=temp_db, session_id="parent")
+    await resumed.init()
+    assert resumed.skills["delegate_task"]._delegation_count == 2
+    await resumed.close()
 
 
 def test_bounded_history_keeps_complete_tool_protocol():

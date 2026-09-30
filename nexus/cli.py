@@ -27,6 +27,7 @@ from nexus.providers import discover_providers, provider_for_model
 from nexus.transcription import TranscriptionError, transcribe_file
 
 load_dotenv()
+DEFAULT_MODEL = os.getenv("AETHERIS_MODEL", "ollama/llama3")
 
 app = typer.Typer(
     name="Aetheris",
@@ -103,9 +104,7 @@ def _agent(
 
 @app.command()
 def chat(
-    model: str = typer.Option(
-        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
-    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("default", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -186,9 +185,7 @@ async def _chat(
 @app.command()
 def run(
     task: str = typer.Argument(...),
-    model: str = typer.Option(
-        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
-    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("run", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -216,9 +213,7 @@ def run(
 def resume(
     session: str = typer.Argument(..., help="Existing session ID to continue."),
     instruction: str = typer.Argument("Continue the task.", metavar="INSTRUCTION"),
-    model: str = typer.Option(
-        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
-    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
@@ -344,9 +339,7 @@ def providers(json_output: bool = typer.Option(False, "--json")) -> None:
 @app.command()
 def doctor(
     workspace: str = typer.Option(".", "--workspace", "-w"),
-    model: str = typer.Option(
-        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
-    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
 ) -> None:
     """Check local provider, workspace, optional packages, and child routing."""
     root = Path(workspace).expanduser().resolve()
@@ -502,9 +495,7 @@ def serve(
     port: int = typer.Option(8787, "--port"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
-    model: str = typer.Option(
-        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
-    ),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
     max_steps: int = typer.Option(12, "--max-steps"),
     cost_budget: float = typer.Option(0.25, "--cost-budget"),
     read_only: bool = typer.Option(True, "--read-only/--allow-write"),
