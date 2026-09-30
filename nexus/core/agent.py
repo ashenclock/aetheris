@@ -66,7 +66,7 @@ class Agent:
         self.max_steps = max_steps
         self.cost_budget_usd = cost_budget_usd
         self.memory = SessionMemory(db_path=db_path, session_id=session_id)
-        self.tracker = CostTracker()
+        self.tracker = CostTracker(model_name)
         self.policy = policy or build_policy()
         self.workspace_root = (
             Path(workspace_root).expanduser().resolve()
@@ -92,9 +92,7 @@ class Agent:
         )
         self.delegation_budget = delegation_budget or DelegationBudget(
             float(
-                os.getenv(
-                    "AETHERIS_SUBAGENT_BUDGET_USD", str(self.subagent_budget_usd)
-                )
+                os.getenv("AETHERIS_SUBAGENT_BUDGET_USD", str(self.subagent_budget_usd))
             ),
             self.max_subagents,
         )
@@ -275,7 +273,7 @@ class Agent:
             await self.memory.checkpoint(state, "Task resumed.")
             return state
 
-        self.tracker = CostTracker()
+        self.tracker = CostTracker(self.model_name)
         state = TaskState(
             session_id=self.session_id,
             goal=goal,
@@ -438,9 +436,7 @@ class Agent:
                         and skill.last_child_summary is not None
                     ):
                         state.record_subagent(skill.last_child_summary)
-                        state.record_subagent_budget(
-                            self.delegation_budget.snapshot()
-                        )
+                        state.record_subagent_budget(self.delegation_budget.snapshot())
                     success = not result.lower().startswith(("error", "failed"))
                     state.record_step(
                         name,

@@ -26,11 +26,20 @@ class RememberSkill(BaseSkill):
         return "Store durable project knowledge in a human-readable Markdown wiki."
 
     @property
+    def requires_confirmation(self) -> bool:
+        """Treat curated wiki writes as a proposed memory update."""
+        return True
+
+    @property
     def parameters_schema(self) -> type[BaseModel]:
         return RememberSchema
 
     async def execute(self, **kwargs) -> str:
-        root = self.workspace_root / ".aetheris/wiki" if self.workspace_root else ".aetheris/wiki"
+        root = (
+            self.workspace_root / ".aetheris/wiki"
+            if self.workspace_root
+            else ".aetheris/wiki"
+        )
         path = KnowledgeStore(root).remember(
             kwargs["topic"], kwargs["content"], kwargs.get("source")
         )

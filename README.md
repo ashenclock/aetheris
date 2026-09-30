@@ -96,6 +96,15 @@ export OPENAI_API_KEY="..."
 export AETHERIS_MODEL="openai/gpt-4o-mini"
 ```
 
+Supported LiteLLM provider examples are `openai/gpt-4o-mini`,
+`deepseek/deepseek-chat`, `gemini/gemini-2.5-flash`,
+`openrouter/openai/gpt-4o-mini`, `anthropic/claude-3-5-haiku-latest`, and
+`ollama/llama3`. Run `aetheris providers` to inspect which credentials are
+present locally. Discovery is offline and never selects a provider silently.
+For bounded live smoke tests, use `python evals/providers.py --live`; without
+`--live` the command only prints the test plan. Missing keys are reported as
+skipped rather than treated as successful tests.
+
 For Streamlit Community Cloud, deploy `streamlit_app.py` from the repository's
 GitHub branch, keep `requirements.txt` at the repository root, and add the
 provider key in Streamlit Secrets. Never commit `.streamlit/secrets.toml`.
@@ -126,6 +135,8 @@ Useful CLI commands are:
 
 ```bash
 aetheris doctor --workspace .
+aetheris providers
+aetheris providers --json
 aetheris chat --workspace . --session repair-tests
 aetheris run "Inspect the test layout" --json
 aetheris status --db aetheris_memory.db --session repair-tests
@@ -166,6 +177,8 @@ The runtime separates three things:
    messages plus lexical wiki matches.
 
 The `remember` tool can record an evidence source and `[[page-topic]]` links.
+It is an approval-gated curated-memory write: the model can propose an update,
+but a human confirms it before the Markdown page changes.
 `aetheris wiki --graph` and the Streamlit knowledge panel render those links in
 an Obsidian-like view. This is an LLM-assisted wiki, not an LLM-owned truth
 store: the model proposes content, while a human can inspect and edit the

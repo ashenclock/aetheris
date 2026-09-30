@@ -23,6 +23,7 @@ from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
 from nexus.core.memory import SessionMemory
 from nexus.core.state import TaskState
+from nexus.providers import discover_providers, provider_for_model
 from nexus.transcription import TranscriptionError, transcribe_file
 
 load_dotenv()
@@ -102,7 +103,9 @@ def _agent(
 
 @app.command()
 def chat(
-    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
+    model: str = typer.Option(
+        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
+    ),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("default", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -172,7 +175,9 @@ async def _chat(
 
             with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
                 reply = await agent.chat(expand_file_tags(raw))
-            console.print(Panel(Markdown(reply), title="Aetheris", border_style="green"))
+            console.print(
+                Panel(Markdown(reply), title="Aetheris", border_style="green")
+            )
             _print_state(await agent.memory.load_state())
     finally:
         await agent.close()
@@ -181,13 +186,17 @@ async def _chat(
 @app.command()
 def run(
     task: str = typer.Argument(...),
-    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
+    model: str = typer.Option(
+        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
+    ),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     session: str = typer.Option("run", "--session", "-s"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
     cost_budget: float = typer.Option(1.0, "--cost-budget"),
-    json_output: bool = typer.Option(False, "--json", help="Print reply and state as JSON."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print reply and state as JSON."
+    ),
 ) -> None:
     asyncio.run(
         _run(
@@ -207,7 +216,9 @@ def run(
 def resume(
     session: str = typer.Argument(..., help="Existing session ID to continue."),
     instruction: str = typer.Argument("Continue the task.", metavar="INSTRUCTION"),
-    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
+    model: str = typer.Option(
+        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
+    ),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
     max_steps: int = typer.Option(40, "--max-steps"),
@@ -303,6 +314,33 @@ def skills() -> None:
     console.print(table)
 
 
+@app.command("providers")
+def providers(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Show provider credentials detected locally without making API calls."""
+    discovered = discover_providers()
+    if json_output:
+        console.print_json(json.dumps(discovered))
+        return
+    table = Table(title="Aetheris providers (discovery only)")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Example model")
+    table.add_column("Credentials")
+    table.add_column("Status")
+    for item in discovered:
+        configured = bool(item["configured"])
+        table.add_row(
+            str(item["provider"]),
+            str(item["model"]),
+            str(item["credentials"]),
+            "configured" if configured else "not configured",
+        )
+    console.print(table)
+    console.print(
+        "[dim]Discovery never calls a provider or switches models. Use an explicit "
+        "--model for a live smoke test.[/dim]"
+    )
+
+
 @app.command()
 def doctor(
     workspace: str = typer.Option(".", "--workspace", "-w"),
@@ -319,7 +357,9 @@ def doctor(
         (
             "workspace",
             str(root),
-            "ok" if root.exists() and os.access(root, os.W_OK) else "check path/writability",
+            "ok"
+            if root.exists() and os.access(root, os.W_OK)
+            else "check path/writability",
         )
     )
     if model.startswith("responses/"):
@@ -334,21 +374,67 @@ def doctor(
             (
                 "openai SDK",
                 "installed" if importlib.util.find_spec("openai") else "missing",
-                "ok" if importlib.util.find_spec("openai") else "pip install -e '.[transcription]'",
+                "ok"
+                if importlib.util.find_spec("openai")
+                else "pip install -e '.[transcription]'",
             )
         )
     elif model.startswith("ollama/"):
         installed = shutil.which("ollama") is not None
-        checks.append(("Ollama CLI", "installed" if installed else "missing", "ok" if installed else "install Ollama"))
+        checks.append(
+            (
+                "Ollama CLI",
+                "installed" if installed else "missing",
+                "ok" if installed else "install Ollama",
+            )
+        )
     else:
-        checks.append(("provider", model, "verify provider credentials"))
+        checks.append(
+            ("provider", provider_for_model(model), "verify provider credentials")
+        )
+
+    for item in discover_providers():
+        if item["configured"]:
+            checks.append(
+                (
+                    f"provider: {item['provider']}",
+                    str(item["model"]),
+                    "credential detected; no network call made",
+                )
+            )
 
     subagent_model = os.getenv("AETHERIS_SUBAGENT_MODEL") or model
-    checks.append(("sub-agent model", subagent_model, "inherits parent" if subagent_model == model else "explicit override"))
-    checks.append(("sub-agent budget", os.getenv("AETHERIS_SUBAGENT_BUDGET_USD", "0.25"), "total shared reservation"))
-    checks.append(("max sub-agents", os.getenv("AETHERIS_MAX_SUBAGENTS", "2"), "bounded"))
-    checks.append(("Streamlit", "installed" if importlib.util.find_spec("streamlit") else "missing", "optional web demo"))
-    checks.append(("Docker CLI", "installed" if shutil.which("docker") else "missing", "daemon still needs to be running"))
+    checks.append(
+        (
+            "sub-agent model",
+            subagent_model,
+            "inherits parent" if subagent_model == model else "explicit override",
+        )
+    )
+    checks.append(
+        (
+            "sub-agent budget",
+            os.getenv("AETHERIS_SUBAGENT_BUDGET_USD", "0.25"),
+            "total shared reservation",
+        )
+    )
+    checks.append(
+        ("max sub-agents", os.getenv("AETHERIS_MAX_SUBAGENTS", "2"), "bounded")
+    )
+    checks.append(
+        (
+            "Streamlit",
+            "installed" if importlib.util.find_spec("streamlit") else "missing",
+            "optional web demo",
+        )
+    )
+    checks.append(
+        (
+            "Docker CLI",
+            "installed" if shutil.which("docker") else "missing",
+            "daemon still needs to be running",
+        )
+    )
 
     table = Table(title="Aetheris doctor")
     table.add_column("Check", style="cyan")
@@ -387,7 +473,9 @@ def transcribe(
     language: str | None = typer.Option(None, "--language"),
     prompt: str | None = typer.Option(None, "--prompt"),
     response_format: str = typer.Option("json", "--response-format"),
-    output: Path | None = typer.Option(None, "--output", help="Write transcript text to a file."),
+    output: Path | None = typer.Option(
+        None, "--output", help="Write transcript text to a file."
+    ),
 ) -> None:
     """Transcribe one audio file through the configured API provider."""
     try:
@@ -414,11 +502,15 @@ def serve(
     port: int = typer.Option(8787, "--port"),
     db_path: str = typer.Option("aetheris_memory.db", "--db", "-d"),
     workspace: str = typer.Option(".", "--workspace", "-w"),
-    model: str = typer.Option(os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"),
+    model: str = typer.Option(
+        os.getenv("AETHERIS_MODEL", "ollama/llama3"), "--model", "-m"
+    ),
     max_steps: int = typer.Option(12, "--max-steps"),
     cost_budget: float = typer.Option(0.25, "--cost-budget"),
     read_only: bool = typer.Option(True, "--read-only/--allow-write"),
-    api_token: str | None = typer.Option(None, "--api-token", envvar="AETHERIS_API_TOKEN"),
+    api_token: str | None = typer.Option(
+        None, "--api-token", envvar="AETHERIS_API_TOKEN"
+    ),
 ) -> None:
     """Run the small authenticated HTTP adapter used by n8n and demos."""
     serve_api(

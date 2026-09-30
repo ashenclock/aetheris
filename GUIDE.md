@@ -22,6 +22,30 @@ It reports provider credentials without printing their values, optional SDKs,
 the workspace, child routing, Streamlit, and Docker CLI availability. It does
 not install packages or silently change providers.
 
+To inspect provider options without making network calls:
+
+```bash
+aetheris providers
+```
+
+To exercise every provider for which a key is configured, run the explicit
+live smoke test. It makes one short request per selected model and returns
+JSON with status, latency, and provider-reported token usage:
+
+```bash
+python evals/providers.py                  # plan only
+python evals/providers.py --live           # configured providers only
+python evals/providers.py --live \
+  --model openai/gpt-4o-mini \
+  --model deepseek/deepseek-chat \
+  --model gemini/gemini-2.5-flash \
+  --model openrouter/openai/gpt-4o-mini
+```
+
+The live command is intentionally opt-in. It does not rotate keys, discover
+models over the network, or silently fall back to another provider. Record the
+model, result, latency, tokens, and cost separately for a real comparison.
+
 For a local Ollama model, start Ollama separately and pull a model that is
 available on the machine:
 

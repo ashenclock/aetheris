@@ -12,11 +12,13 @@ logger = logging.getLogger("AetherisTracker")
 class CostTracker:
     """Track token totals and provider-reported cost estimates for one task."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_name: str | None = None) -> None:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.estimated_cost_usd: float | None = None
-        self.cost_estimate_available = True
+        self.cost_estimate_available = not (model_name or "").startswith(
+            ("mock/", "offline/")
+        )
 
     def restore(self, state: TaskState) -> None:
         self.prompt_tokens = state.prompt_tokens
