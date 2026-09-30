@@ -21,6 +21,25 @@ class GitHubRepository:
     name: str
 
 
+def _validate_archive_members(
+    members: list[tarfile.TarInfo], extraction_root: Path
+) -> None:
+    """Reject archive entries that could escape or alter the extraction root."""
+    root = extraction_root.resolve()
+    for member in members:
+        target = (extraction_root / member.name).resolve()
+        if not target.is_relative_to(root):
+            raise GitHubRepositoryError("GitHub archive contains an unsafe path.")
+        if member.issym() or member.islnk():
+            raise GitHubRepositoryError(
+                "GitHub archive contains a symlink or hard link, which is not allowed."
+            )
+        if not (member.isdir() or member.isfile()):
+            raise GitHubRepositoryError(
+                "GitHub archive contains an unsupported special file."
+            )
+
+
 def parse_repository_url(raw_url: str) -> GitHubRepository:
     parsed = urlparse(raw_url.strip())
     if parsed.scheme != "https" or parsed.netloc.lower() not in {
@@ -102,13 +121,12 @@ def download_public_repository(
     extraction_root.mkdir()
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as handle:
-            for member in handle.getmembers():
-                target = (extraction_root / member.name).resolve()
-                if not target.is_relative_to(extraction_root.resolve()):
-                    raise GitHubRepositoryError("GitHub archive contains an unsafe path.")
+            _validate_archive_members(handle.getmembers(), extraction_root)
             handle.extractall(extraction_root)
-    except (tarfile.TarError, OSError) as exc:
+    except (GitHubRepositoryError, tarfile.TarError, OSError) as exc:
         temporary.cleanup()
+        if isinstance(exc, GitHubRepositoryError):
+            raise
         raise GitHubRepositoryError("GitHub returned an invalid repository archive.") from exc
 
     roots = [path for path in extraction_root.iterdir() if path.is_dir()]
