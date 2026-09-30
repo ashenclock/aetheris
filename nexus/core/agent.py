@@ -23,6 +23,7 @@ from nexus.skills.search_code import SearchCodeSkill
 from nexus.skills.write_file import WriteFileSkill
 
 from .knowledge import KnowledgeStore
+from .delegation import DelegationBudget
 from .memory import SessionMemory
 from .policy import DecisionPolicy, HeuristicPolicy, build_policy
 from .state import TaskState, TaskStatus
@@ -54,6 +55,11 @@ class Agent:
         policy: DecisionPolicy | None = None,
         workspace_root: str | Path | None = None,
         enabled_skill_names: set[str] | None = None,
+        subagent_model: str | None = None,
+        subagent_budget_usd: float | None = None,
+        max_subagents: int | None = None,
+        context_char_budget: int | None = None,
+        delegation_budget: DelegationBudget | None = None,
     ):
         self.model_name = model_name
         self.session_id = session_id
@@ -68,6 +74,30 @@ class Agent:
             else None
         )
         self.enabled_skill_names = enabled_skill_names
+        self.subagent_model = (
+            subagent_model or os.getenv("AETHERIS_SUBAGENT_MODEL") or model_name
+        )
+        self.subagent_budget_usd = (
+            subagent_budget_usd
+            if subagent_budget_usd is not None
+            else min(cost_budget_usd * 0.25, 0.25)
+        )
+        self.max_subagents = (
+            max_subagents
+            if max_subagents is not None
+            else int(os.getenv("AETHERIS_MAX_SUBAGENTS", "2"))
+        )
+        self.context_char_budget = context_char_budget or int(
+            os.getenv("AETHERIS_CONTEXT_CHARS", "24000")
+        )
+        self.delegation_budget = delegation_budget or DelegationBudget(
+            float(
+                os.getenv(
+                    "AETHERIS_SUBAGENT_BUDGET_USD", str(self.subagent_budget_usd)
+                )
+            ),
+            self.max_subagents,
+        )
         self.skills = self._load_skills()
         knowledge_root = (
             self.workspace_root / ".aetheris/wiki"
@@ -100,7 +130,12 @@ class Agent:
                     model_name=self.model_name,
                     db_path=self.memory.db_path,
                     parent_session=self.session_id,
-                    cost_budget_usd=self.cost_budget_usd,
+                    cost_budget_usd=self.subagent_budget_usd,
+                    subagent_model=self.subagent_model,
+                    max_children=self.max_subagents,
+                    delegation_budget=self.delegation_budget,
+                    context_char_budget=min(self.context_char_budget, 12_000),
+                    parent_memory=self.memory,
                 )
             else:
                 skill = skill_type(workspace_root=self.workspace_root)
@@ -126,6 +161,15 @@ class Agent:
         state = await self.memory.load_state()
         if state is not None:
             self.tracker.restore(state)
+            self.delegation_budget.restore(
+                {
+                    "total_usd": state.subagent_budget_usd,
+                    "reserved_usd": state.subagent_budget_reserved_usd,
+                    "spent_usd": state.subagent_budget_spent_usd,
+                    "children_started": state.subagent_children_started,
+                    "max_children": self.max_subagents,
+                }
+            )
 
     async def close(self) -> None:
         await self.policy.close()
@@ -142,7 +186,9 @@ class Agent:
                 await self.memory.checkpoint(state, "Execution budget reached.")
                 return self._pause_message(state, "Execution budget reached.")
 
-            history = self._bounded_history(await self.memory.get_history())
+            history = self._bounded_history(
+                await self.memory.get_history(), max_chars=self.context_char_budget
+            )
             latest_user_message = next(
                 (
                     message.get("content", "")
@@ -235,6 +281,7 @@ class Agent:
             goal=goal,
             max_steps=self.max_steps,
             cost_budget_usd=self.cost_budget_usd,
+            subagent_budget_usd=self.delegation_budget.total_usd,
         )
         await self.memory.checkpoint(state, "Task started.")
         return state
@@ -382,7 +429,18 @@ class Agent:
                     result = "Error: tool execution was not approved."
                     state.record_step(name, success=False, error=result)
                 else:
-                    result = await skill.execute(**arguments)
+                    execution_arguments = dict(arguments)
+                    if isinstance(skill, DelegateTaskSkill):
+                        execution_arguments["_parent_state"] = state
+                    result = await skill.execute(**execution_arguments)
+                    if (
+                        isinstance(skill, DelegateTaskSkill)
+                        and skill.last_child_summary is not None
+                    ):
+                        state.record_subagent(skill.last_child_summary)
+                        state.record_subagent_budget(
+                            self.delegation_budget.snapshot()
+                        )
                     success = not result.lower().startswith(("error", "failed"))
                     state.record_step(
                         name,
@@ -435,6 +493,9 @@ class Agent:
             f"- last action: {state.last_action or 'none'}\n"
             f"- last error: {state.last_error or 'none'}\n"
             f"- tool calls/failures: {state.tool_calls}/{state.tool_failures}\n"
+            f"- sub-agent sessions/failures: {state.subagent_sessions}/{state.subagent_failures}\n"
+            f"- sub-agent tokens: {state.subagent_prompt_tokens}/{state.subagent_completion_tokens}\n"
+            f"- sub-agent budget: ${state.subagent_budget_spent_usd:.4f} spent / ${state.subagent_budget_usd:.2f}\n"
             "Continue toward the original goal. Prefer small, reversible actions."
             f"{knowledge_block}"
         )

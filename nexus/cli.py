@@ -60,6 +60,18 @@ def _print_state(state: TaskState | None) -> None:
     table.add_row("Tool calls", f"{state.tool_calls} ({state.tool_failures} failed)")
     table.add_row("Failures", str(state.consecutive_failures))
     table.add_row("Checkpoints", str(state.checkpoint_count))
+    table.add_row(
+        "Sub-agents",
+        f"{state.subagent_sessions} ({state.subagent_failures} failed)",
+    )
+    table.add_row(
+        "Sub-agent tokens",
+        f"{state.subagent_prompt_tokens}/{state.subagent_completion_tokens}",
+    )
+    table.add_row(
+        "Sub-agent budget",
+        f"${state.subagent_budget_spent_usd:.4f} spent / ${state.subagent_budget_usd:.2f}",
+    )
     table.add_row("Last action", state.last_action or "none")
     if state.last_error:
         table.add_row("Last error", state.last_error)

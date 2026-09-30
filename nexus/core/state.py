@@ -30,6 +30,16 @@ class TaskState(BaseModel):
     recovered_interrupted_calls: int = 0
     human_review_pauses: int = 0
     checkpoint_count: int = 0
+    subagent_sessions: int = 0
+    subagent_failures: int = 0
+    subagent_prompt_tokens: int = 0
+    subagent_completion_tokens: int = 0
+    subagent_estimated_cost_usd: float | None = None
+    subagent_cost_estimate_available: bool = False
+    subagent_budget_usd: float = 0.25
+    subagent_budget_reserved_usd: float = 0.0
+    subagent_budget_spent_usd: float = 0.0
+    subagent_children_started: int = 0
 
     def record_step(
         self,
@@ -67,6 +77,37 @@ class TaskState(BaseModel):
             and self.estimated_cost_usd >= self.cost_budget_usd
         )
         return step_limit_reached or cost_limit_reached
+
+    def record_subagent(self, summary: dict[str, float | int | bool | None]) -> None:
+        self.subagent_sessions += 1
+        self.subagent_failures += int(summary.get("failed", False))
+        self.subagent_prompt_tokens += int(summary.get("prompt_tokens", 0) or 0)
+        self.subagent_completion_tokens += int(
+            summary.get("completion_tokens", 0) or 0
+        )
+        cost = summary.get("estimated_cost_usd")
+        if cost is not None:
+            self.subagent_estimated_cost_usd = (
+                self.subagent_estimated_cost_usd or 0.0
+            ) + float(cost)
+        self.subagent_cost_estimate_available = (
+            self.subagent_cost_estimate_available
+            or bool(summary.get("cost_estimate_available", False))
+        )
+
+    def record_subagent_budget(self, snapshot: dict[str, float | int]) -> None:
+        self.subagent_budget_usd = float(
+            snapshot.get("total_usd", self.subagent_budget_usd)
+        )
+        self.subagent_budget_reserved_usd = float(
+            snapshot.get("reserved_usd", self.subagent_budget_reserved_usd)
+        )
+        self.subagent_budget_spent_usd = float(
+            snapshot.get("spent_usd", self.subagent_budget_spent_usd)
+        )
+        self.subagent_children_started = int(
+            snapshot.get("children_started", self.subagent_children_started)
+        )
 
 
 class Checkpoint(BaseModel):

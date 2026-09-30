@@ -42,3 +42,21 @@ def test_state_rejects_unbounded_configuration():
         TaskState(session_id="task", goal="bad", max_steps=0)
     with pytest.raises(ValueError):
         TaskState(session_id="task", goal="bad", cost_budget_usd=0)
+
+
+def test_state_records_child_usage_separately_from_parent_usage():
+    state = TaskState(session_id="task", goal="delegate")
+    state.record_subagent(
+        {
+            "prompt_tokens": 12,
+            "completion_tokens": 4,
+            "estimated_cost_usd": 0.03,
+            "cost_estimate_available": True,
+            "failed": False,
+        }
+    )
+
+    assert state.subagent_sessions == 1
+    assert state.subagent_prompt_tokens == 12
+    assert state.subagent_completion_tokens == 4
+    assert state.subagent_estimated_cost_usd == 0.03
