@@ -9,12 +9,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
+from dotenv import load_dotenv
+
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 from litellm import acompletion
 
 from nexus.providers import PROVIDERS, discover_providers
+
+load_dotenv()
 
 
 async def smoke(model: str) -> dict[str, Any]:
