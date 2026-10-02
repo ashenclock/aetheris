@@ -21,6 +21,8 @@ COMMANDS = {
     "/permissions": "Show approval mode",
     "/write_enable": "Enable approved workspace writes (no shell)",
     "/write_disable": "Return to read-only tools",
+    "/execute_enable": "Enable approved shell execution on a private server",
+    "/execute_disable": "Disable shell execution",
     "/permissions session": "Approve ordinary tools for this chat",
     "/permissions ask": "Ask before sensitive actions",
     "/wiki": "Read durable knowledge and graph",
@@ -51,6 +53,8 @@ class ChatControls:
     max_steps: int = 40
     cost_budget: float = 1.0
     writes_enabled: bool = False
+    allow_execution: bool = False
+    execution_enabled: bool = False
 
     @property
     def enabled_tools(self) -> set[str] | None:
@@ -64,6 +68,8 @@ class ChatControls:
             "recall",
             "delegate_task",
         }
+        if self.execution_enabled:
+            tools.add("run_command")
         return (
             tools | {"create_directory", "write_file", "edit_file", "remember"}
             if self.writes_enabled
@@ -134,10 +140,24 @@ class ChatControls:
             return CommandResult(
                 f"Switched to {argument} in fresh session '{self.session}'. Previous sessions are preserved."
             )
+        if command in {"/execute_enable", "/execute_disable"}:
+            if command == "/execute_disable":
+                self.execution_enabled = False
+                return CommandResult("Shell execution disabled.")
+            if self.read_only and not self.allow_execution:
+                return CommandResult(
+                    "Execution is disabled by the server. Only a private trusted deployment may set AETHERIS_WEB_EXECUTION=1. Public hosting must not enable this."
+                )
+            self.execution_enabled = True
+            self.writes_enabled = True
+            return CommandResult(
+                "Execution and workspace writes enabled. Approve each command explicitly. Shell runs as the server user, is not confined to the workspace, and is NOT an untrusted-code sandbox. Do not expose this service publicly."
+            )
         if command in {"/write_enable", "/write_disable"}:
             if command == "/write_disable":
                 self.read_only = True
                 self.writes_enabled = False
+                self.execution_enabled = False
                 self.session_approval = False
                 return CommandResult(
                     "Read-only tools enabled. Writes, shell and MCP are disabled."
@@ -156,7 +176,11 @@ class ChatControls:
             if argument:
                 self.session_approval = argument == "session"
             mode = (
-                "read-only"
+                (
+                    "restricted tools, per-action approval"
+                    if self.writes_enabled
+                    else "read-only"
+                )
                 if self.read_only
                 else (
                     "SESSION (automatic)"
@@ -165,7 +189,12 @@ class ChatControls:
                 )
             )
             return CommandResult(
-                f"Approval mode: {mode}. Workspace writes: {'enabled (per-action approval)' if self.writes_enabled or not self.read_only else 'disabled'}. Use /write_enable or /write_disable. Use /permissions session or /permissions ask in local mode. Sensitive reads and MCP always require explicit approval. Shell execution is not sandboxed."
+                f"Approval mode: {mode}. Workspace writes: {'enabled (per-action approval)' if self.writes_enabled or not self.read_only else 'disabled'}. Execution: {'enabled' if self.execution_enabled or not self.read_only else 'disabled'}. Shell execution is not sandboxed.",
+                data={
+                    "available_tools": sorted(self.enabled_tools)
+                    if self.enabled_tools is not None
+                    else "full local toolset"
+                },
             )
         if command in {"/wiki", "/kb"}:
             store = KnowledgeStore(self.workspace / ".aetheris/wiki", self.workspace)

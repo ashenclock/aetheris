@@ -119,7 +119,7 @@ def _show_knowledge(root: Path) -> None:
         )
         if not pages:
             st.info(
-                "This workspace has no wiki pages. Read-only GitHub mode cannot create them; local coding mode can use the approved remember tool."
+                "No wiki pages yet. Use /write_enable, ask for a sourced note with remember, and approve the write."
             )
             _show_example_knowledge()
             return
@@ -165,7 +165,7 @@ with st.sidebar:
                     root, str(root / "aetheris_memory.db"), model
                 )
     st.caption(
-        "GitHub mode supports bounded read-only sub-agents. Use /write_enable for approved workspace file and wiki writes. Shell, training execution, MCP and Git push remain unavailable."
+        "Use /write_enable for approved file/folder/wiki writes. Bounded sub-agents remain read-only. /execute_enable is available only when the operator enables private execution; arbitrary commands are not sandboxed."
     )
 
     st.subheader("Load a public repository")
@@ -188,7 +188,11 @@ with st.sidebar:
                 f"{repository.owner}/{repository.name}:{branch or 'default'}"
             )
             st.session_state.controls = ChatControls(
-                root, str(root / ".aetheris/streamlit.sqlite3"), model, read_only=True
+                root,
+                str(root / ".aetheris/streamlit.sqlite3"),
+                model,
+                read_only=True,
+                allow_execution=os.getenv("AETHERIS_WEB_EXECUTION") == "1",
             )
             st.success(f"Loaded {st.session_state.repo_name}")
         except GitHubRepositoryError as exc:
@@ -272,7 +276,7 @@ if st.session_state.repo_root:
     st.subheader(f"Repository: {st.session_state.repo_name}")
     st.info(
         (
-            "GitHub snapshot: approved workspace writes enabled; no shell or MCP. Changes are temporary."
+            f"GitHub snapshot: approved workspace writes enabled; execution {'enabled (NOT sandboxed)' if controls.execution_enabled else 'disabled'}. Changes are temporary."
             if controls.writes_enabled
             else "Read-only GitHub snapshot. Use /write_enable for approved workspace edits; parent paths remain blocked."
         )
@@ -280,6 +284,14 @@ if st.session_state.repo_root:
         else "Local coding mode: approvals are not a sandbox. Use /permissions to inspect access."
     )
     st.caption(f"Session: {controls.session} · Model: {controls.model}")
+    st.caption(
+        "Active tools: "
+        + (
+            ", ".join(sorted(controls.enabled_tools))
+            if controls.enabled_tools is not None
+            else "full local toolset"
+        )
+    )
     if st.session_state.get("notice"):
         st.info(st.session_state.pop("notice"))
     with st.expander("/ Commands"):

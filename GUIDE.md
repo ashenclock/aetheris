@@ -1,5 +1,12 @@
 # Aetheris quick guide
 
+Private local hosting only: the operator may set `AETHERIS_WEB_EXECUTION=1`.
+Then `/execute_enable` exposes approved shell commands for training/testing and
+also enables writes. `/execute_disable` removes shell; `/write_disable` removes
+both. Commands run as the server user, can access its environment/network and
+are not workspace-confined or sandboxed. Never enable this on shared/public
+hosting. Install project dependencies in a disposable workspace virtualenv.
+
 In a GitHub web snapshot, `/write_enable` adds workspace-scoped write, edit and
 wiki tools with per-action approval. It never enables shell or MCP, nor access
 to parent paths. `/write_disable` returns to read-only tools; `/permissions`

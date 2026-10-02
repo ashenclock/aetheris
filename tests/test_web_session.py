@@ -9,6 +9,25 @@ from nexus.web.session import run_turn
 
 
 @pytest.mark.asyncio
+async def test_execution_requires_operator_opt_in_and_can_be_revoked(tmp_path):
+    controls = ChatControls(
+        tmp_path, str(tmp_path / "state.db"), "mock/offline", read_only=True
+    )
+    result = await controls.command("/execute_enable")
+    assert "disabled by the server" in result.text
+    assert "run_command" not in controls.enabled_tools
+    controls.allow_execution = True
+    await controls.command("/execute_enable")
+    assert {"run_command", "create_directory", "write_file"} <= controls.enabled_tools
+    assert not controls.session_approval
+    await controls.command("/execute_disable")
+    assert "run_command" not in controls.enabled_tools
+    assert "write_file" in controls.enabled_tools
+    await controls.command("/write_disable")
+    assert "write_file" not in controls.enabled_tools
+
+
+@pytest.mark.asyncio
 async def test_hosted_write_enable_requires_approval_and_keeps_shell_disabled(
     tmp_path, monkeypatch
 ):
