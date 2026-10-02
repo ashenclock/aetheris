@@ -19,6 +19,7 @@ async def test_hosted_write_enable_requires_approval_and_keeps_shell_disabled(
     await controls.command("/write_enable")
     assert {"write_file", "edit_file", "remember"} <= controls.enabled_tools
     assert "run_command" not in controls.enabled_tools
+    assert "delegate_task" in controls.enabled_tools
     model = AsyncMock(
         side_effect=[
             response(call_id="create", filename="iris/script.py"),
@@ -30,6 +31,10 @@ async def test_hosted_write_enable_requires_approval_and_keeps_shell_disabled(
     assert not (tmp_path / "iris/script.py").exists()
     pending = (await controls.memory.load_state()).pending_approval
     assert pending
+    request = model.call_args.kwargs
+    names = {tool["function"]["name"] for tool in request["tools"]}
+    assert {"write_file", "delegate_task"} <= names
+    assert "available tools NOW:" in request["messages"][0]["content"]
     await run_turn(controls, "Approve", approval_id=pending["id"], approval=True)
     assert (tmp_path / "iris/script.py").read_text() == "fixture"
     await controls.command("/write_disable")

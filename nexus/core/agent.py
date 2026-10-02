@@ -17,6 +17,7 @@ from litellm import acompletion
 from pydantic import ValidationError
 
 from nexus.skills.base_skill import BaseSkill
+from nexus.skills.create_directory import CreateDirectorySkill
 from nexus.skills.delegate_task import DelegateTaskSkill
 from nexus.skills.edit_file import EditFileSkill
 from nexus.skills.list_dir import ListDirSkill
@@ -46,6 +47,7 @@ from .tracker import CostTracker
 logger = logging.getLogger("AetherisAgent")
 
 SKILL_TYPES = (
+    CreateDirectorySkill,
     EditFileSkill,
     DelegateTaskSkill,
     ListDirSkill,
@@ -66,6 +68,7 @@ LOCAL_CODING_SKILLS = {
     "search_code",
     "edit_file",
     "write_file",
+    "create_directory",
     "run_command",
 }
 READ_ONLY_SKILLS = {
@@ -1048,6 +1051,11 @@ class Agent:
         return (
             "Runtime state (authoritative and compact):\n"
             f"{workspace_block}"
+            f"- available tools NOW: {', '.join(sorted(self.skills)) or 'none'}\n"
+            "Current tool schemas and this list override old capability claims in chat or wiki. "
+            "You are the Aetheris runtime agent, not a separate assistant reading its code. "
+            "Use write_file for nested files: it creates parent directories. "
+            "If run_command is absent, creating code does not mean executing it.\n"
             f"- task: {goal}\n"
             f"- status: {state.status.value}\n"
             f"- steps: {state.step_count}/{state.max_steps}\n"

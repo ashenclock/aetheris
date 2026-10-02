@@ -284,6 +284,7 @@ def test_local_coding_profile_limits_tools_and_sets_small_model_guidance(
         "search_code",
         "edit_file",
         "write_file",
+        "create_directory",
         "run_command",
     }
     assert (

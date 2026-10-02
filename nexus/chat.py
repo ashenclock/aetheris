@@ -62,9 +62,10 @@ class ChatControls:
             "read_file",
             "search_code",
             "recall",
+            "delegate_task",
         }
         return (
-            tools | {"write_file", "edit_file", "remember"}
+            tools | {"create_directory", "write_file", "edit_file", "remember"}
             if self.writes_enabled
             else tools
         )

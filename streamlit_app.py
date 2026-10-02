@@ -132,7 +132,7 @@ def _show_knowledge(root: Path) -> None:
 st.set_page_config(page_title="Aetheris", page_icon="◈", layout="wide")
 st.title("Aetheris")
 st.caption(
-    "One runtime, terminal and web chat. Local coding is opt-in; GitHub snapshots are read-only."
+    "One runtime, terminal and web chat. GitHub snapshots start read-only; workspace writes are opt-in."
 )
 
 if "repo_root" not in st.session_state:
@@ -165,7 +165,7 @@ with st.sidebar:
                     root, str(root / "aetheris_memory.db"), model
                 )
     st.caption(
-        "The hosted demo exposes only read-only tools. Shell, write, edit, and push operations are intentionally unavailable."
+        "GitHub mode supports bounded read-only sub-agents. Use /write_enable for approved workspace file and wiki writes. Shell, training execution, MCP and Git push remain unavailable."
     )
 
     st.subheader("Load a public repository")
