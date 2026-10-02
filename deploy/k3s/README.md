@@ -67,9 +67,13 @@ completed successfully. Image import and rollout succeeded; the pod is Running
 and Ready with zero restarts. HTTP health checks returned `ok` both inside the
 pod and through localhost port-forward. Streamlit AppTest initialized the page
 inside the pod without exceptions, under UID 1000 and the read-only-root
-manifest. The cluster currently has only a placeholder Secret without provider
-credentials; live model requests and native-browser visual checks are not
-verified in Kubernetes. Sustained memory requirements are not load-tested.
+manifest. A DeepSeek-only Secret was subsequently configured locally without
+printing or committing its value. Live Streamlit AppTest inside the pod loaded
+a public GitHub archive, exercised slash commands, greeted the user and
+completed repository inspection: three tool calls, zero failures, nine activity
+events, 6478 prompt tokens and 433 completion tokens, estimated $0.002049048
+for the inspection. This is framework-level UI evidence, not a native-browser
+visual check. Sustained memory requirements are not load-tested.
 
 The current private test is available at http://127.0.0.1:8502 while this runs:
 
