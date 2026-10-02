@@ -35,6 +35,20 @@ def test_local_ui_commands_and_trace_render_without_model(monkeypatch, tmp_path)
     assert app.session_state["controls"].session_approval is False
 
 
+def test_empty_wiki_shows_example_without_creating_facts(monkeypatch, tmp_path):
+    monkeypatch.setenv("AETHERIS_WEB_LOCAL", "1")
+    monkeypatch.setenv("AETHERIS_WEB_WORKSPACE", str(tmp_path))
+    app = AppTest.from_file(Path(__file__).parents[1] / "streamlit_app.py").run()
+    next(
+        button for button in app.button if button.label == "Open local workspace"
+    ).click().run()
+    app.chat_input[0].set_value("/wiki").run()
+    assert not app.exception
+    assert any("Example knowledge graph" in item.value for item in app.info)
+    assert app.get("graphviz_chart")
+    assert not list(tmp_path.rglob("*.md"))
+
+
 def test_local_ui_tool_activity_and_approval_button(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

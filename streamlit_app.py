@@ -83,17 +83,45 @@ def _show_history(history: list[dict[str, Any]]) -> None:
             )
 
 
+def _show_example_knowledge() -> None:
+    """Display illustrative pages without writing them into agent memory."""
+    st.info("Example knowledge graph — not facts extracted from this repository.")
+    st.graphviz_chart(
+        'digraph Example { rankdir=LR; node [shape=box]; "Runtime" -> "Checkpoints"; "Runtime" -> "Wiki"; "Wiki" -> "Checkpoints"; }'
+    )
+    for title, content in (
+        (
+            "Runtime",
+            "An agent runtime controls tool execution and limits. See [[Checkpoints]] and [[Wiki]].",
+        ),
+        (
+            "Checkpoints",
+            "Saved task state supports resume. Interrupted side effects can remain ambiguous.",
+        ),
+        (
+            "Wiki",
+            "Markdown pages hold reviewed knowledge; links connect related topics such as [[Checkpoints]].",
+        ),
+    ):
+        with st.expander(f"Example: {title}"):
+            st.markdown(content)
+    st.caption(
+        "Illustrative only: these pages are not saved or included in model context."
+    )
+
+
 def _show_knowledge(root: Path) -> None:
     store = KnowledgeStore(root / ".aetheris/wiki", root)
     pages = store.pages()
-    with st.expander("Knowledge base / wiki", expanded=bool(pages)):
+    with st.expander("Knowledge base / wiki", expanded=True):
         st.caption(
             "Human-readable durable facts. Use [[page-topic]] inside Markdown to create a link."
         )
         if not pages:
             st.info(
-                "No durable facts in this workspace yet. The local CLI can create them with the remember skill."
+                "This workspace has no wiki pages. Read-only GitHub mode cannot create them; local coding mode can use the approved remember tool."
             )
+            _show_example_knowledge()
             return
         st.graphviz_chart(store.graph_dot(), use_container_width=True)
         for page in pages:
@@ -315,7 +343,10 @@ if st.session_state.repo_root:
         st.info(result.text)
         if result.data is not None:
             if result.view == "wiki":
-                st.graphviz_chart(result.data["graph"])
+                if not result.data["pages"]:
+                    _show_example_knowledge()
+                else:
+                    st.graphviz_chart(result.data["graph"])
                 for page in result.data["pages"]:
                     st.markdown(redact(page["content"]))
             elif result.view in {"sessions", "providers"}:

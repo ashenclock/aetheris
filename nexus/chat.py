@@ -141,7 +141,12 @@ class ChatControls:
                 for path in store.pages()
             ]
             return CommandResult(
-                f"Wiki: {store.root}\nAsk the agent to remember a sourced decision; link pages with [[topic]].",
+                f"Wiki: {store.root}\n"
+                + (
+                    f"{len(pages)} pages; links use [[topic]]."
+                    if pages
+                    else "No wiki pages in this workspace. Read-only mode cannot create knowledge; use approved remember in local coding mode."
+                ),
                 data={"pages": pages, "graph": store.graph_dot()},
                 view="wiki",
             )
