@@ -7,15 +7,6 @@ from nexus.core.agent import Agent
 from nexus.core.approval import ApprovalRequired
 from nexus.skills.read_file import ReadFileSkill
 
-READ_ONLY_TOOLS = {
-    "inspect_workspace",
-    "list_directory",
-    "read_file",
-    "search_code",
-    "recall",
-}
-
-
 async def run_turn(
     controls: ChatControls,
     prompt: str,
@@ -55,7 +46,7 @@ async def run_turn(
         workspace_root=Path(controls.workspace),
         max_steps=controls.max_steps,
         cost_budget_usd=controls.cost_budget,
-        enabled_skill_names=READ_ONLY_TOOLS if controls.read_only else None,
+        enabled_skill_names=controls.enabled_tools,
         progress_callback=progress,
         approval_callback=confirm,
     )

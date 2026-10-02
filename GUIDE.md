@@ -1,5 +1,11 @@
 # Aetheris quick guide
 
+In a GitHub web snapshot, `/write_enable` adds workspace-scoped write, edit and
+wiki tools with per-action approval. It never enables shell or MCP, nor access
+to parent paths. `/write_disable` returns to read-only tools; `/permissions`
+shows the current mode. Snapshot edits are temporary and are not pushed to GitHub.
+For example, ask for `iris_lr/iris_lr.py`, not `../iris_lr/iris_lr.py`.
+
 ## Start a chat
 
 From the repository, activate the installed environment:

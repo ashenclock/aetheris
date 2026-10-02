@@ -19,6 +19,8 @@ COMMANDS = {
     "/model MODEL": "Change model in a fresh session",
     "/provider": "List configured providers",
     "/permissions": "Show approval mode",
+    "/write_enable": "Enable approved workspace writes (no shell)",
+    "/write_disable": "Return to read-only tools",
     "/permissions session": "Approve ordinary tools for this chat",
     "/permissions ask": "Ask before sensitive actions",
     "/wiki": "Read durable knowledge and graph",
@@ -48,6 +50,24 @@ class ChatControls:
     session_approval: bool = False
     max_steps: int = 40
     cost_budget: float = 1.0
+    writes_enabled: bool = False
+
+    @property
+    def enabled_tools(self) -> set[str] | None:
+        if not self.read_only:
+            return None
+        tools = {
+            "inspect_workspace",
+            "list_directory",
+            "read_file",
+            "search_code",
+            "recall",
+        }
+        return (
+            tools | {"write_file", "edit_file", "remember"}
+            if self.writes_enabled
+            else tools
+        )
 
     @property
     def memory(self) -> SessionMemory:
@@ -113,6 +133,18 @@ class ChatControls:
             return CommandResult(
                 f"Switched to {argument} in fresh session '{self.session}'. Previous sessions are preserved."
             )
+        if command in {"/write_enable", "/write_disable"}:
+            if command == "/write_disable":
+                self.read_only = True
+                self.writes_enabled = False
+                self.session_approval = False
+                return CommandResult(
+                    "Read-only tools enabled. Writes, shell and MCP are disabled."
+                )
+            self.writes_enabled = True
+            return CommandResult(
+                "Workspace writes enabled. Each write requires approval. Parent paths remain blocked; hosted shell and MCP remain disabled. Changes in GitHub snapshots are temporary."
+            )
         if command == "/permissions":
             if argument not in {"", "ask", "session"}:
                 return CommandResult("Usage: /permissions [ask|session]")
@@ -132,7 +164,7 @@ class ChatControls:
                 )
             )
             return CommandResult(
-                f"Approval mode: {mode}. Use /permissions session or /permissions ask. Sensitive reads and MCP always require explicit approval. Shell execution is not sandboxed."
+                f"Approval mode: {mode}. Workspace writes: {'enabled (per-action approval)' if self.writes_enabled or not self.read_only else 'disabled'}. Use /write_enable or /write_disable. Use /permissions session or /permissions ask in local mode. Sensitive reads and MCP always require explicit approval. Shell execution is not sandboxed."
             )
         if command in {"/wiki", "/kb"}:
             store = KnowledgeStore(self.workspace / ".aetheris/wiki", self.workspace)

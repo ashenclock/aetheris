@@ -171,6 +171,7 @@ def _agent(
     mode: str = "execute",
     agent_profile: str | None = None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    enabled_skill_names: set[str] | None = None,
 ) -> Agent:
     return Agent(
         model,
@@ -182,6 +183,7 @@ def _agent(
         mode=mode,
         agent_profile=agent_profile,
         progress_callback=progress_callback,
+        enabled_skill_names=enabled_skill_names,
     )
 
 
@@ -289,6 +291,7 @@ async def _chat(
             workspace=workspace,
             agent_profile=agent_profile,
             progress_callback=_chat_progress,
+            enabled_skill_names=controls.enabled_tools,
         )
         agent.session_approval = controls.session_approval
         try:

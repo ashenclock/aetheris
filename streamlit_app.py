@@ -271,7 +271,11 @@ if st.session_state.repo_root:
     _run(controls.memory.init_db())
     st.subheader(f"Repository: {st.session_state.repo_name}")
     st.info(
-        "Read-only GitHub archive snapshot (not a git clone/pull)."
+        (
+            "GitHub snapshot: approved workspace writes enabled; no shell or MCP. Changes are temporary."
+            if controls.writes_enabled
+            else "Read-only GitHub snapshot. Use /write_enable for approved workspace edits; parent paths remain blocked."
+        )
         if controls.read_only
         else "Local coding mode: approvals are not a sandbox. Use /permissions to inspect access."
     )

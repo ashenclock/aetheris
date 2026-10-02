@@ -8,6 +8,43 @@ from nexus.chat import ChatControls
 from nexus.web.session import run_turn
 
 
+@pytest.mark.asyncio
+async def test_hosted_write_enable_requires_approval_and_keeps_shell_disabled(
+    tmp_path, monkeypatch
+):
+    controls = ChatControls(
+        tmp_path, str(tmp_path / "state.db"), "mock/offline", read_only=True
+    )
+    assert "write_file" not in controls.enabled_tools
+    await controls.command("/write_enable")
+    assert {"write_file", "edit_file", "remember"} <= controls.enabled_tools
+    assert "run_command" not in controls.enabled_tools
+    model = AsyncMock(
+        side_effect=[
+            response(call_id="create", filename="iris/script.py"),
+            response("Created."),
+        ]
+    )
+    monkeypatch.setattr("nexus.core.agent.acompletion", model)
+    _, state, _ = await run_turn(controls, "Create a file")
+    assert not (tmp_path / "iris/script.py").exists()
+    pending = (await controls.memory.load_state()).pending_approval
+    assert pending
+    await run_turn(controls, "Approve", approval_id=pending["id"], approval=True)
+    assert (tmp_path / "iris/script.py").read_text() == "fixture"
+    await controls.command("/write_disable")
+    assert "write_file" not in controls.enabled_tools
+
+
+@pytest.mark.asyncio
+async def test_write_enable_does_not_allow_parent_paths(tmp_path):
+    from nexus.skills.write_file import WriteFileSkill
+
+    skill = WriteFileSkill(workspace_root=tmp_path)
+    result = await skill.execute(filepath="../escaped-write-test.txt", content="no")
+    assert "outside the workspace" in result
+
+
 def response(content=None, call_id=None, filename=None):
     calls = (
         None
