@@ -63,9 +63,20 @@ the image reference/pull policy deliberately. No push is part of these commands.
 Status on 2026-10-02: Docker Desktop was started and a dedicated local K3d
 cluster `aetheris-demo` was created. Its single node is Ready. The manifest
 passed Kubernetes server-side dry-run validation. The initial image build is
-still downloading dependencies; rollout, runtime memory requirements and
-read-only-root compatibility are **not verified**. The cluster currently has
-only a placeholder Secret without provider credentials.
+completed successfully. Image import and rollout succeeded; the pod is Running
+and Ready with zero restarts. HTTP health checks returned `ok` both inside the
+pod and through localhost port-forward. Streamlit AppTest initialized the page
+inside the pod without exceptions, under UID 1000 and the read-only-root
+manifest. The cluster currently has only a placeholder Secret without provider
+credentials; live model requests and native-browser visual checks are not
+verified in Kubernetes. Sustained memory requirements are not load-tested.
+
+The current private test is available at http://127.0.0.1:8502 while this runs:
+
+```bash
+kubectl --context k3d-aetheris-demo -n aetheris-demo port-forward \
+  --address 127.0.0.1 service/aetheris-web 8502:8501
+```
 There is no automatic CD pipeline or public deployment. Keep the local CLI/UI
 demo as the interview default. Add authentication, aggregate spending limits
 and network policy before any shared hosting.
