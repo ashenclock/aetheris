@@ -5,26 +5,32 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
+from uuid import uuid4
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 from rich.table import Table
 from dotenv import load_dotenv
 
 from nexus.api import serve as serve_api
+from nexus.chat import COMMANDS, ChatControls
+from nexus.core.events import format_event, redact
 from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
 from nexus.core.memory import SessionBusyError, SessionMemory
 from nexus.core.state import TaskState
 from nexus.mcp import MCPConnectionError, MCPClient, configured_servers
-from nexus.providers import discover_providers, provider_for_model
+from nexus.providers import PROVIDERS, discover_providers, provider_for_model
 from nexus.project import (
     add_mcp_server,
     create_agent,
@@ -34,6 +40,7 @@ from nexus.project import (
 )
 from nexus.transcription import TranscriptionError, transcribe_file
 from nexus.skills.web_search import WebSearchSkill
+from nexus.skills.read_file import ReadFileSkill
 
 load_dotenv()
 DEFAULT_MODEL = os.getenv("AETHERIS_MODEL", "ollama/llama3")
@@ -50,21 +57,76 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(skill_app, name="skill")
 app.add_typer(mcp_app, name="mcp")
 console = Console()
+CHAT_COMMANDS = tuple(
+    name.replace(" NAME", " ").replace(" MODEL", " ") for name in COMMANDS
+)
 
 
-def expand_file_tags(text: str) -> str:
+def _chat_progress(event: str, details: dict[str, Any]) -> None:
+    console.print(Text(format_event(event, details)))
+
+
+async def expand_file_tags(text: str, workspace: str | Path) -> str:
     chunks = [text]
+    reader = ReadFileSkill(workspace)
     for raw_path in re.findall(r"@([^\s]+)", text):
-        path = Path(raw_path).expanduser()
-        if path.is_file():
+        path = reader.resolve_path(raw_path, must_exist=True)
+        if path is None or not path.is_file():
             chunks.append(
-                f"\nFile: {path}\n```\n{path.read_text(encoding='utf-8')}\n```"
+                f"\nFile not attached (outside workspace or missing): {raw_path}"
             )
+        elif not await reader.confirm({"filepath": raw_path}):
+            chunks.append(
+                f"\nFile not attached (sensitive read not approved): {raw_path}"
+            )
+        else:
+            try:
+                content = await reader.execute(filepath=raw_path)
+            except (OSError, UnicodeError) as exc:
+                content = f"Error reading file: {exc}"
+            chunks.append(f"\nFile: {path}\n```\n{content}\n```")
     return "\n".join(chunks)
 
 
+def _chat_model_error(model: str) -> str | None:
+    provider = provider_for_model(model)
+    credential_provider = "OpenAI" if provider == "OpenAI Responses" else provider
+    credential_names = next(
+        (spec.env_vars for spec in PROVIDERS if spec.name == credential_provider), ()
+    )
+    if credential_names and not any(
+        os.getenv(name, "").strip() for name in credential_names
+    ):
+        names = " or ".join(credential_names)
+        return f"{provider} needs {names}. Add it to .env, then restart chat."
+
+    if provider != "Ollama":
+        return None
+    executable = shutil.which("ollama")
+    if not executable:
+        return "Ollama is not installed. Install it, or choose a configured API model with --model."
+    try:
+        result = subprocess.run(
+            [executable, "list"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "Ollama is not responding. Start the Ollama app or run `ollama serve`."
+    if result.returncode:
+        return "Ollama is not responding. Start the Ollama app or run `ollama serve`."
+    requested = model.split("/", maxsplit=1)[1]
+    installed = {
+        line.split()[0] for line in result.stdout.splitlines()[1:] if line.split()
+    }
+    if requested not in installed:
+        return (
+            f"Ollama model '{requested}' is not installed. Run `ollama pull {requested}`, "
+            "or switch to a configured API model with `--model`."
+        )
+    return None
+
+
 def _state_payload(state: TaskState | None) -> dict[str, Any] | None:
-    return state.model_dump(mode="json") if state else None
+    return state.public_payload() if state else None
 
 
 def _print_state(state: TaskState | None) -> None:
@@ -75,7 +137,7 @@ def _print_state(state: TaskState | None) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
     table.add_row("Session", state.session_id)
-    table.add_row("Status", state.status.value)
+    table.add_row("Status", state.status_label)
     table.add_row("Steps", f"{state.step_count}/{state.max_steps}")
     table.add_row("Tool calls", f"{state.tool_calls} ({state.tool_failures} failed)")
     table.add_row("Failures", str(state.consecutive_failures))
@@ -108,6 +170,7 @@ def _agent(
     workspace: str,
     mode: str = "execute",
     agent_profile: str | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> Agent:
     return Agent(
         model,
@@ -118,6 +181,7 @@ def _agent(
         workspace_root=Path(workspace).expanduser().resolve(),
         mode=mode,
         agent_profile=agent_profile,
+        progress_callback=progress_callback,
     )
 
 
@@ -133,6 +197,10 @@ def chat(
         None, "--agent", help="Project agent profile"
     ),
 ) -> None:
+    error = _chat_model_error(model)
+    if error:
+        console.print(f"[yellow]{error}[/yellow]")
+        raise typer.Exit(code=2)
     asyncio.run(
         _chat(model, db_path, session, workspace, max_steps, cost_budget, agent_profile)
     )
@@ -147,88 +215,93 @@ async def _chat(
     cost_budget: float,
     agent_profile: str | None = None,
 ) -> None:
-    agent = _agent(
-        model=model,
-        db_path=db_path,
-        session_id=session_id,
+    controls = ChatControls(
+        Path(workspace).resolve(),
+        db_path,
+        model,
+        session_id,
         max_steps=max_steps,
         cost_budget=cost_budget,
-        workspace=workspace,
-        agent_profile=agent_profile,
     )
-    await agent.init()
-    prompt = PromptSession()
+    await controls.memory.init_db()
+    prompt = PromptSession(
+        completer=WordCompleter(CHAT_COMMANDS, ignore_case=True, sentence=True),
+        complete_while_typing=True,
+    )
     console.print(
-        Panel.fit(
-            f"[bold]Aetheris ready[/bold]\nModel: {model}\nWorkspace: {Path(workspace).resolve()}\nSession: {session_id}\n[dim]/help /status /new NAME /resume NAME /exit[/dim]",
+        Panel(
+            f"Aetheris chat\nModel: {model}\nWorkspace: {controls.workspace}\n"
+            f"Session: {session_id}\nType a message, or / for commands. /wiki shows memory; /trace shows activity.",
             border_style="cyan",
         )
     )
-    try:
-        while True:
+    while True:
+        try:
             raw = (
-                await prompt.prompt_async(
-                    f"[aetheris:{session_id}:{os.path.basename(os.path.abspath(workspace))}] > "
-                )
+                await prompt.prompt_async(f"You ({controls.workspace.name}) > ")
             ).strip()
-            if not raw:
-                continue
-            if raw in {"/exit", "/quit"}:
-                break
-            if raw == "/help":
-                console.print(
-                    "[cyan]/new NAME[/cyan] session, [cyan]/resume NAME[/cyan] switch, "
-                    "[cyan]/status[/cyan] state, [cyan]/skills[/cyan] project skills, "
-                    "[cyan]/mcp[/cyan] servers, [cyan]/permissions[/cyan] boundaries, "
-                    "[cyan]@path[/cyan] attach a text file. Use `aetheris plan` for plan mode."
+        except (EOFError, KeyboardInterrupt):
+            console.print("Leaving chat. Your session is saved.")
+            return
+        except OSError as exc:
+            console.print(
+                Text(
+                    f"Interactive input unavailable: {exc}. Use a terminal.",
+                    style="yellow",
                 )
-                continue
-            if raw == "/status":
-                _print_state(await agent.memory.load_state())
-                continue
-            if raw == "/skills":
-                list_project_skills(workspace)
-                continue
-            if raw == "/mcp":
-                list_mcp_command(workspace)
-                continue
-            if raw == "/permissions":
-                console.print(
-                    "read/search: automatic; write/edit/run_command: approval; "
-                    "sensitive reads (.env, keys, .ssh, .aws, .git): approval; "
-                    "plan mode: read-only tool set."
-                )
-                continue
-            if raw.startswith("/new ") or raw.startswith("/resume "):
-                session_id = raw.split(maxsplit=1)[1]
-                await agent.close()
-                agent = _agent(
-                    model=model,
-                    db_path=db_path,
-                    session_id=session_id,
-                    max_steps=max_steps,
-                    cost_budget=cost_budget,
-                    workspace=workspace,
-                    agent_profile=agent_profile,
-                )
-                await agent.init()
-                console.print(f"Session switched to [bold]{session_id}[/bold].")
-                continue
-
-            with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
-                try:
-                    reply = await agent.chat(expand_file_tags(raw))
-                except SessionBusyError as exc:
-                    console.print(
-                        f"[yellow]{exc} Check status or retry later.[/yellow]"
-                    )
+            )
+            return
+        if not raw:
+            continue
+        if raw.startswith("/"):
+            if raw.startswith("/model "):
+                error = _chat_model_error(raw.split(maxsplit=1)[1])
+                if error:
+                    console.print(Text(error, style="yellow"))
                     continue
+            result = await controls.command(raw)
+            console.print(Text(result.text))
+            if result.view == "sessions":
+                table = Table("Session", "Status", "Updated", title="Saved sessions")
+                for item in result.data:
+                    table.add_row(item["session"], item["status"], item["updated"])
+                console.print(table)
+            elif result.view == "wiki":
+                for page in result.data["pages"]:
+                    console.print(
+                        Panel(Markdown(redact(page["content"])), title=page["topic"])
+                    )
+                console.print(Text(result.data["graph"]))
+            elif result.data is not None:
+                console.print_json(data=redact(result.data))
+            if result.exit:
+                console.print("Leaving chat. Your session is saved.")
+                return
+            if result.prompt is None:
+                continue
+            raw = result.prompt
+        agent = _agent(
+            model=controls.model,
+            db_path=db_path,
+            session_id=controls.session,
+            max_steps=controls.max_steps,
+            cost_budget=controls.cost_budget,
+            workspace=workspace,
+            agent_profile=agent_profile,
+            progress_callback=_chat_progress,
+        )
+        agent.session_approval = controls.session_approval
+        try:
+            await agent.init()
+            reply = await agent.chat(await expand_file_tags(raw, workspace))
             console.print(
                 Panel(Markdown(reply), title="Aetheris", border_style="green")
             )
             _print_state(await agent.memory.load_state())
-    finally:
-        await agent.close()
+        except SessionBusyError as exc:
+            console.print(Text(f"{exc} Check status or retry later.", style="yellow"))
+        finally:
+            await agent.close()
 
 
 @app.command()
@@ -259,6 +332,7 @@ def run(
             json_output,
             "execute",
             agent_profile,
+            fresh_if_existing=True,
         )
     )
 
@@ -296,6 +370,7 @@ def plan(
             "plan",
             agent_profile,
             output,
+            True,
         )
     )
 
@@ -330,6 +405,7 @@ def goal(
                 "plan",
                 agent_profile,
                 plan_path,
+                True,
             )
         )
         console.print(
@@ -352,6 +428,7 @@ def goal(
             "execute",
             agent_profile,
             None,
+            True,
         )
     )
 
@@ -383,6 +460,7 @@ def resume(
             json_output,
             "execute",
             agent_profile,
+            resume_only=True,
         )
     )
 
@@ -411,14 +489,17 @@ def search(
             "domains": domain,
         }
         if not await skill.confirm(arguments):
+            console.print(
+                "Web search was not run: interactive approval is unavailable or was denied."
+            )
             raise typer.Exit(code=1)
         return await skill.execute(**arguments)
 
     result = asyncio.run(search_once())
     if result.startswith("Error:"):
-        console.print(f"[red]{result}[/red]")
+        console.print(Text(result, style="red"))
         raise typer.Exit(code=1)
-    console.print(Panel(result, title="External web search", border_style="cyan"))
+    console.print(Panel(Text(result), title="External web search", border_style="cyan"))
 
 
 async def _run(
@@ -433,6 +514,8 @@ async def _run(
     mode: str = "execute",
     agent_profile: str | None = None,
     output: Path | None = None,
+    fresh_if_existing: bool = False,
+    resume_only: bool = False,
 ) -> None:
     agent = _agent(
         model=model,
@@ -445,10 +528,37 @@ async def _run(
         agent_profile=agent_profile,
     )
     await agent.init()
+    previous_state = await agent.memory.load_state()
+    if resume_only and (
+        previous_state is None or previous_state.status.value == "completed"
+    ):
+        await agent.close()
+        console.print(
+            f"Session '{session}' has no resumable task. Start a new task with `aetheris run`."
+        )
+        raise typer.Exit(code=2)
+    if fresh_if_existing and previous_state is not None:
+        await agent.close()
+        previous_session = session
+        session = f"{session}-{uuid4().hex[:8]}"
+        console.print(
+            f"Existing session '{previous_session}' is preserved; starting a new task in '{session}'."
+        )
+        agent = _agent(
+            model=model,
+            db_path=db_path,
+            session_id=session,
+            max_steps=max_steps,
+            cost_budget=cost_budget,
+            workspace=workspace,
+            mode=mode,
+            agent_profile=agent_profile,
+        )
+        await agent.init()
     try:
         try:
             with console.status("[bold cyan]Aetheris is working...", spinner="dots"):
-                reply = await agent.chat(expand_file_tags(task))
+                reply = await agent.chat(await expand_file_tags(task, workspace))
         except SessionBusyError as exc:
             if json_output:
                 console.print_json(json.dumps({"error": str(exc), "session": session}))
@@ -464,9 +574,13 @@ async def _run(
             console.print_json(
                 json.dumps({"reply": reply, "state": _state_payload(state)})
             )
-            return
-        console.print(Panel(Markdown(reply), title="Aetheris", border_style="green"))
-        _print_state(state)
+        else:
+            console.print(
+                Panel(Markdown(reply), title="Aetheris", border_style="green")
+            )
+            _print_state(state)
+        if state is not None and state.status.value != "completed":
+            raise typer.Exit(code=2)
     finally:
         await agent.close()
 

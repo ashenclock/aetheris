@@ -30,7 +30,7 @@ class ReadFileSkill(BaseSkill):
 
     @property
     def requires_confirmation(self) -> bool:
-        """Run the path-aware confirmation hook on every read request."""
+        """Enable the confirmation hook for sensitive paths."""
         return True
 
     @classmethod
@@ -48,14 +48,9 @@ class ReadFileSkill(BaseSkill):
         filepath = self.resolve_path(raw_filepath)
         if filepath is None or not self._is_sensitive(filepath):
             return filepath is not None
-        try:
-            from rich.prompt import Confirm
-
-            return Confirm.ask(
-                f"Approve reading potentially sensitive file '{filepath}'?"
-            )
-        except (EOFError, KeyboardInterrupt):
-            return False
+        return self._ask_confirmation(
+            f"Approve reading potentially sensitive file '{filepath}'?"
+        )
 
     async def execute(self, **kwargs) -> str:
         raw_filepath = kwargs.get("filepath", "")

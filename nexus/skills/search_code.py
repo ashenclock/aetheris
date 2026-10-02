@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from .base_skill import BaseSkill
 
 MAX_SEARCH_FILE_BYTES = 1_000_000
@@ -40,9 +40,14 @@ class SearchCodeSkill(BaseSkill):
         return SearchCodeSchema
 
     async def execute(self, **kwargs) -> str:
-        pattern = kwargs.get("pattern", "")
-        extension = kwargs.get("extension", "")
-        max_results = kwargs.get("max_results", 20)
+        try:
+            arguments = SearchCodeSchema.model_validate(kwargs)
+        except ValidationError as exc:
+            return f"Error: invalid search arguments: {exc}"
+
+        pattern = arguments.pattern
+        extension = arguments.extension
+        max_results = arguments.max_results
 
         if not pattern:
             return "Error: pattern cannot be empty."

@@ -24,6 +24,7 @@ async def test_delegate_task_runs_one_read_only_child(tmp_path):
         subagent_model="mock/local-small",
         db_path=str(tmp_path / "agent.sqlite3"),
         parent_session="parent",
+        max_completion_tokens=321,
     )
     model = AsyncMock(return_value=response("The child inspected README.md."))
     with patch("nexus.core.agent.acompletion", model):
@@ -36,6 +37,7 @@ async def test_delegate_task_runs_one_read_only_child(tmp_path):
     assert "delegate_task" not in tool_names
     assert "read_file" in tool_names
     assert model.call_args.kwargs["model"] == "mock/local-small"
+    assert model.call_args.kwargs["max_tokens"] == 321
 
 
 def test_delegation_budget_stops_after_configured_children():

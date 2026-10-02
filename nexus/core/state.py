@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 from pydantic import BaseModel, Field
+
+MAX_RECENT_TOOL_SIGNATURES = 128
 
 
 class TaskStatus(str, Enum):
@@ -21,6 +24,10 @@ class TaskState(BaseModel):
     consecutive_failures: int = 0
     last_action: str | None = None
     last_error: str | None = None
+    pending_approval: dict[str, Any] | None = None
+    recent_tool_signatures: list[str] = Field(
+        default_factory=list, max_length=MAX_RECENT_TOOL_SIGNATURES
+    )
     tool_calls: int = 0
     tool_failures: int = 0
     prompt_tokens: int = 0
@@ -40,6 +47,28 @@ class TaskState(BaseModel):
     subagent_budget_reserved_usd: float = 0.0
     subagent_budget_spent_usd: float = 0.0
     subagent_children_started: int = 0
+
+    @property
+    def status_label(self) -> str:
+        """Explain that a final model turn does not verify the requested goal."""
+        return (
+            "model finished (goal unverified)"
+            if self.status == TaskStatus.COMPLETED
+            else self.status.value
+        )
+
+    def public_payload(self) -> dict[str, object]:
+        """Serialize state with an explicit, derived completion interpretation."""
+        payload = self.model_dump(mode="json")
+        payload.pop("recent_tool_signatures", None)
+        pending = payload.get("pending_approval")
+        if pending:
+            payload["pending_approval"] = {
+                "id": pending["id"],
+                "tool": pending["function"]["name"],
+            }
+        payload["status_label"] = self.status_label
+        return payload
 
     def record_step(
         self,
@@ -71,12 +100,13 @@ class TaskState(BaseModel):
 
     def should_pause(self) -> bool:
         step_limit_reached = self.step_count >= self.max_steps
+        failure_limit_reached = self.consecutive_failures >= 3
         cost_limit_reached = (
             self.cost_estimate_available
             and self.estimated_cost_usd is not None
             and self.estimated_cost_usd >= self.cost_budget_usd
         )
-        return step_limit_reached or cost_limit_reached
+        return step_limit_reached or failure_limit_reached or cost_limit_reached
 
     def record_subagent(self, summary: dict[str, float | int | bool | None]) -> None:
         self.subagent_sessions += 1

@@ -195,16 +195,11 @@ async def run_task(task: dict) -> dict:
                 checks = {
                     "status": state.status.value == task["expected_status"],
                     "tool_failures": state.tool_failures
-                    == task.get("expected_tool_failures", state.tool_failures),
+                    == task.get("expected_tool_failures", 0),
                     "recovered_calls": state.recovered_interrupted_calls
-                    == task.get(
-                        "expected_recovered_interrupted_calls",
-                        state.recovered_interrupted_calls,
-                    ),
+                    == task.get("expected_recovered_interrupted_calls", 0),
                     "human_review_pauses": state.human_review_pauses
-                    == task.get(
-                        "expected_human_review_pauses", state.human_review_pauses
-                    ),
+                    == task.get("expected_human_review_pauses", 0),
                     "expected_files": all(artifact_checks.values()),
                     "expected_tool_output": all(output_checks.values()),
                     "absent_files": all(absent_checks.values()),
@@ -217,6 +212,7 @@ async def run_task(task: dict) -> dict:
                     "tool_output_checks": output_checks,
                     "absent_file_checks": absent_checks,
                     "status": state.status.value,
+                    "status_label": state.status_label,
                     "steps": state.step_count,
                     "tool_calls": state.tool_calls,
                     "tool_failures": state.tool_failures,

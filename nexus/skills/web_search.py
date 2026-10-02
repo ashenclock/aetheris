@@ -1,4 +1,5 @@
 import asyncio
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,8 +12,27 @@ class WebSearchSchema(BaseModel):
     query: str = Field(..., min_length=1, max_length=500)
     max_results: int = Field(5, ge=1, le=8)
     region: str = Field("us-en", min_length=2, max_length=12)
-    timelimit: str | None = Field(None, description="d, w, m, or y")
-    backend: str = Field("auto", description="DDGS backend or auto")
+    timelimit: Literal["d", "w", "m", "y"] | None = Field(
+        None, description="Search freshness: day, week, month, or year."
+    )
+    backend: Literal[
+        "auto",
+        "brave",
+        "duckduckgo",
+        "google",
+        "grokipedia",
+        "mojeek",
+        "startpage",
+        "wikipedia",
+        "yahoo",
+    ] = Field(
+        "auto",
+        description=(
+            "Search backend: auto uses AETHERIS_SEARCH_BACKEND or defaults to "
+            "duckduckgo; select one supported DDGS engine, or explicitly choose "
+            "brave to use the Brave API."
+        ),
+    )
     domains: list[str] = Field(default_factory=list, max_length=5)
 
 

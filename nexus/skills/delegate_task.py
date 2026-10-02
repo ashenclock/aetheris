@@ -35,6 +35,7 @@ class DelegateTaskSkill(BaseSkill):
         delegation_budget: DelegationBudget | None = None,
         context_char_budget: int = 12_000,
         parent_memory=None,
+        max_completion_tokens: int = 4096,
     ) -> None:
         super().__init__(workspace_root)
         self.model_name = model_name
@@ -47,6 +48,7 @@ class DelegateTaskSkill(BaseSkill):
             cost_budget_usd, max_children
         )
         self.context_char_budget = context_char_budget
+        self.max_completion_tokens = max_completion_tokens
         self.parent_memory = parent_memory
         self.parent_state = None
         self._delegation_count = 0
@@ -101,11 +103,13 @@ class DelegateTaskSkill(BaseSkill):
             workspace_root=self.workspace_root,
             enabled_skill_names={
                 "list_directory",
+                "inspect_workspace",
                 "read_file",
                 "search_code",
                 "recall",
             },
             context_char_budget=self.context_char_budget,
+            max_completion_tokens=self.max_completion_tokens,
         )
         await child.init()
         try:

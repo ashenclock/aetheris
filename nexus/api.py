@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import aiosqlite
+
 from .core.agent import Agent
-from .core.memory import SessionBusyError, SessionMemory
+from .core.memory import SessionBusyError
+from .core.state import TaskState
 
 logger = logging.getLogger(__name__)
 REQUEST_READ_TIMEOUT_SECONDS = 10
@@ -162,13 +165,23 @@ class AetherisAPIServer(ThreadingHTTPServer):
         if not isinstance(session, str) or not session.strip() or len(session) > 100:
             raise AetherisAPIError("'session' must be a short non-empty string.")
         max_steps = body.get("max_steps", self.max_steps)
-        if not isinstance(max_steps, int) or not 1 <= max_steps <= self.max_steps:
+        if (
+            isinstance(max_steps, bool)
+            or not isinstance(max_steps, int)
+            or not 1 <= max_steps <= self.max_steps
+        ):
             raise AetherisAPIError(
                 f"'max_steps' must be an integer between 1 and {self.max_steps}."
             )
 
         enabled = (
-            {"list_directory", "read_file", "search_code", "recall"}
+            {
+                "inspect_workspace",
+                "list_directory",
+                "read_file",
+                "search_code",
+                "recall",
+            }
             if self.read_only
             else None
         )
@@ -189,7 +202,7 @@ class AetherisAPIServer(ThreadingHTTPServer):
                 return {
                     "session": session,
                     "reply": reply,
-                    "state": state.model_dump(mode="json") if state else None,
+                    "state": state.public_payload() if state else None,
                 }
             finally:
                 await agent.close()
@@ -197,12 +210,26 @@ class AetherisAPIServer(ThreadingHTTPServer):
     async def task_status(self, session: str) -> dict[str, Any]:
         if not session:
             raise AetherisAPIError("session cannot be empty")
-        memory = SessionMemory(db_path=self.db_path, session_id=session)
-        await memory.init_db()
-        state = await memory.load_state()
+        database = Path(self.db_path).expanduser().resolve()
+        state = None
+        if database.exists():
+            async with aiosqlite.connect(
+                f"{database.as_uri()}?mode=ro", uri=True
+            ) as db:
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='task_state'"
+                ) as cursor:
+                    table_exists = await cursor.fetchone()
+                if table_exists:
+                    async with db.execute(
+                        "SELECT state_json FROM task_state WHERE session_id = ?",
+                        (session,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                    state = TaskState.model_validate_json(row[0]) if row else None
         return {
             "session": session,
-            "state": state.model_dump(mode="json") if state else None,
+            "state": state.public_payload() if state else None,
         }
 
 

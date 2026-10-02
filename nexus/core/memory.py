@@ -75,6 +75,8 @@ class SessionMemory:
 
     async def init_db(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
+            if os.name != "nt" and self.db_path != ":memory:":
+                os.chmod(Path(self.db_path).expanduser(), 0o600)
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -198,6 +200,55 @@ class SessionMemory:
             ) as cursor:
                 row = await cursor.fetchone()
         return TaskState.model_validate_json(row[0]) if row else None
+
+    async def list_sessions(self) -> list[dict[str, str]]:
+        """List bounded session metadata without loading transcript contents."""
+        database = Path(self.db_path).expanduser().resolve()
+        if not database.is_file():
+            return []
+        async with aiosqlite.connect(f"{database.as_uri()}?mode=ro", uri=True) as db:
+            async with db.execute(
+                "SELECT session_id, state_json, updated_at FROM task_state "
+                "ORDER BY updated_at DESC, session_id LIMIT 50"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [
+            {
+                "session": session,
+                "status": json.loads(payload).get("status", "unknown"),
+                "updated": updated,
+            }
+            for session, payload, updated in rows
+        ]
+
+    async def inspect_trace(self) -> dict[str, list[dict[str, Any]]]:
+        """Bounded runtime metadata; tool output and prompts stay out of this view."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT role, name, tool_call_id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 40",
+                (self.session_id,),
+            ) as cursor:
+                messages = await cursor.fetchall()
+            async with db.execute(
+                "SELECT timestamp, reason, state_json FROM checkpoints WHERE session_id = ? ORDER BY id DESC LIMIT 40",
+                (self.session_id,),
+            ) as cursor:
+                checkpoints = await cursor.fetchall()
+        return {
+            "messages": [
+                dict(zip(("role", "tool", "call_id"), row))
+                for row in reversed(messages)
+            ],
+            "checkpoints": [
+                {
+                    "timestamp": timestamp,
+                    "reason": reason,
+                    "steps": json.loads(payload).get("step_count", 0),
+                    "tool_failures": json.loads(payload).get("tool_failures", 0),
+                }
+                for timestamp, reason, payload in reversed(checkpoints)
+            ],
+        }
 
     async def checkpoint(
         self,

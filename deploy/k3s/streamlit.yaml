@@ -1,0 +1,82 @@
+# Private, ephemeral read-only demo. No Ingress, public LoadBalancer or shell.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aetheris-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aetheris-web
+  template:
+    metadata:
+      labels:
+        app: aetheris-web
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: aetheris-web:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8501
+          env:
+            - name: AETHERIS_WEB_LOCAL
+              value: "0"
+            - name: AETHERIS_MODEL
+              value: deepseek/deepseek-chat
+            - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+              value: "false"
+          envFrom:
+            - secretRef:
+                name: aetheris-provider
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 30
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aetheris-web
+spec:
+  type: ClusterIP
+  selector:
+    app: aetheris-web
+  ports:
+    - port: 8501
+      targetPort: 8501

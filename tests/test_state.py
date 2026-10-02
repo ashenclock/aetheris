@@ -1,6 +1,7 @@
 import pytest
 
-from nexus.core.state import TaskState
+from nexus.cli import _print_state, _state_payload
+from nexus.core.state import TaskState, TaskStatus
 
 
 def test_state_records_success_and_failure_transitions():
@@ -20,6 +21,30 @@ def test_state_records_success_and_failure_transitions():
     assert state.last_error is None
 
 
+def test_completed_status_is_a_model_protocol_state_not_goal_verification():
+    state = TaskState(session_id="task", goal="Build a working application")
+    state.status = TaskStatus.COMPLETED
+
+    assert state.status.value == "completed"
+    assert state.status_label == "model finished (goal unverified)"
+    assert state.tool_calls == 0
+
+    payload = state.public_payload()
+    assert payload["status"] == "completed"
+    assert payload["status_label"] == "model finished (goal unverified)"
+    assert "status_label" not in state.model_dump(mode="json")
+    assert _state_payload(state)["status_label"] == payload["status_label"]
+
+
+def test_cli_labels_completed_status_as_unverified(capsys):
+    state = TaskState(session_id="task", goal="Build a working application")
+    state.status = TaskStatus.COMPLETED
+
+    _print_state(state)
+
+    assert "model finished (goal unverified)" in capsys.readouterr().out
+
+
 def test_step_and_estimated_cost_budgets_pause_in_python():
     state = TaskState(
         session_id="task", goal="bounded", max_steps=2, cost_budget_usd=0.10
@@ -34,6 +59,11 @@ def test_step_and_estimated_cost_budgets_pause_in_python():
     assert not state.should_pause()
     state.record_step("tool", success=True)
     state.record_step("tool", success=True)
+    assert state.should_pause()
+
+
+def test_three_consecutive_failures_are_a_runtime_stop_condition():
+    state = TaskState(session_id="task", goal="bounded", consecutive_failures=3)
     assert state.should_pause()
 
 

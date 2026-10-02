@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import stat
 
 import pytest
 
@@ -63,6 +64,15 @@ async def test_state_and_checkpoint_roundtrip(temp_db):
     assert latest is not None
     assert latest[0].goal == "Fix the tests"
     assert latest[1] == "Inspected repository."
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+async def test_database_is_restricted_to_current_user(temp_db):
+    memory = SessionMemory(db_path=temp_db, session_id="private")
+    await memory.init_db()
+
+    assert stat.S_IMODE(os.stat(temp_db).st_mode) == 0o600
 
 
 @pytest.mark.asyncio

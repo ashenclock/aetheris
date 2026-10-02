@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
-import uuid
 from pathlib import Path
+from typing import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,15 +28,19 @@ from nexus.skills.search_code import SearchCodeSkill
 from nexus.skills.write_file import WriteFileSkill
 from nexus.skills.use_skill import UseSkillSkill
 from nexus.skills.web_search import WebSearchSkill
+from nexus.skills.workspace_overview import WorkspaceOverviewSkill
 from nexus.skills.mcp_tool import MCPToolSkill
-from nexus.mcp import MCPConnectionError, discover_tools
+from nexus.mcp import MCPConnectionError, configured_servers, discover_tools
 from nexus.project import validate_name
 
 from .knowledge import KnowledgeStore
+from .context import bounded_history
+from .approval import ApprovalRequired
+from .events import redact
 from .delegation import DelegationBudget
 from .memory import SessionMemory
 from .policy import DecisionPolicy, HeuristicPolicy, build_policy
-from .state import TaskState, TaskStatus
+from .state import MAX_RECENT_TOOL_SIGNATURES, TaskState, TaskStatus
 from .tracker import CostTracker
 
 logger = logging.getLogger("AetherisAgent")
@@ -51,7 +57,25 @@ SKILL_TYPES = (
     WriteFileSkill,
     UseSkillSkill,
     WebSearchSkill,
+    WorkspaceOverviewSkill,
 )
+LOCAL_CODING_SKILLS = {
+    "inspect_workspace",
+    "list_directory",
+    "read_file",
+    "search_code",
+    "edit_file",
+    "write_file",
+    "run_command",
+}
+READ_ONLY_SKILLS = {
+    "list_directory",
+    "read_file",
+    "recall",
+    "search_code",
+    "web_search",
+    "inspect_workspace",
+}
 
 
 class Agent:
@@ -72,11 +96,53 @@ class Agent:
         delegation_budget: DelegationBudget | None = None,
         mode: str = "execute",
         agent_profile: str | None = None,
+        max_completion_tokens: int | None = None,
+        model_timeout_seconds: float | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        approval_callback: Callable[[BaseSkill, dict[str, Any]], Awaitable[bool]]
+        | None = None,
     ):
         self.model_name = model_name
+        self.progress_callback = progress_callback
+        self.approval_callback = approval_callback
+        # Session approval is set by the local CLI, never by model messages.
+        self.session_approval = False
         self.session_id = session_id
         self.max_steps = max_steps
         self.cost_budget_usd = cost_budget_usd
+        raw_token_cap = os.getenv("AETHERIS_MAX_COMPLETION_TOKENS", "4096")
+        try:
+            self.max_completion_tokens = (
+                max_completion_tokens
+                if max_completion_tokens is not None
+                else int(raw_token_cap)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "AETHERIS_MAX_COMPLETION_TOKENS must be a positive integer"
+            ) from exc
+        if (
+            isinstance(self.max_completion_tokens, bool)
+            or not isinstance(self.max_completion_tokens, int)
+            or self.max_completion_tokens < 1
+        ):
+            raise ValueError("max_completion_tokens must be positive")
+        raw_timeout = os.getenv("AETHERIS_MODEL_TIMEOUT_SECONDS", "120")
+        try:
+            self.model_timeout_seconds = (
+                model_timeout_seconds
+                if model_timeout_seconds is not None
+                else float(raw_timeout)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "AETHERIS_MODEL_TIMEOUT_SECONDS must be a positive number"
+            ) from exc
+        if (
+            not math.isfinite(self.model_timeout_seconds)
+            or self.model_timeout_seconds <= 0
+        ):
+            raise ValueError("model_timeout_seconds must be positive")
         self.memory = SessionMemory(db_path=db_path, session_id=session_id)
         self.tracker = CostTracker(model_name)
         self.policy = policy or build_policy()
@@ -85,7 +151,12 @@ class Agent:
             if workspace_root is not None
             else None
         )
+        self.tool_profile = os.getenv("AETHERIS_TOOL_PROFILE", "default").lower()
+        if self.tool_profile not in {"default", "local-coding"}:
+            raise ValueError("AETHERIS_TOOL_PROFILE must be default or local-coding")
         self.enabled_skill_names = enabled_skill_names
+        if enabled_skill_names is None and self.tool_profile == "local-coding":
+            self.enabled_skill_names = LOCAL_CODING_SKILLS
         self.subagent_model = (
             subagent_model or os.getenv("AETHERIS_SUBAGENT_MODEL") or model_name
         )
@@ -99,9 +170,23 @@ class Agent:
             if max_subagents is not None
             else int(os.getenv("AETHERIS_MAX_SUBAGENTS", "2"))
         )
-        self.context_char_budget = context_char_budget or int(
-            os.getenv("AETHERIS_CONTEXT_CHARS", "24000")
-        )
+        raw_context_budget = os.getenv("AETHERIS_CONTEXT_CHARS", "24000")
+        try:
+            self.context_char_budget = (
+                context_char_budget
+                if context_char_budget is not None
+                else int(raw_context_budget)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "AETHERIS_CONTEXT_CHARS must be a positive integer"
+            ) from exc
+        if (
+            isinstance(self.context_char_budget, bool)
+            or not isinstance(self.context_char_budget, int)
+            or self.context_char_budget < 8_192
+        ):
+            raise ValueError("context_char_budget must be at least 8192 characters")
         self.delegation_budget = delegation_budget or DelegationBudget(
             float(
                 os.getenv("AETHERIS_SUBAGENT_BUDGET_USD", str(self.subagent_budget_usd))
@@ -120,11 +205,22 @@ class Agent:
         )
         self.knowledge = KnowledgeStore(knowledge_root, self.workspace_root)
         self.system_prompt = self._load_system_prompt()
-        if enabled_skill_names is not None:
+        if self.enabled_skill_names is not None:
             self.system_prompt += (
                 "\n\nDeployment mode: the available tools are intentionally limited. "
                 "Do not claim to edit, execute, or persist changes unless an available "
                 "tool actually did so."
+            )
+        if self.tool_profile == "local-coding":
+            self.system_prompt += (
+                "\n\nLOCAL CODING PROFILE: Use only the available repository tools. "
+                "Use relative file paths rooted at the workspace shown in runtime "
+                "context; never target files outside it. "
+                "Inspect before editing, make small changes, and run tests with the "
+                "configured interpreter. Do not install packages unless the user "
+                "explicitly asks; report a missing dependency instead. A final "
+                "answer does not prove task success unless requested artifacts or "
+                "checks were observed."
             )
 
     def _load_system_prompt(self) -> str:
@@ -188,6 +284,7 @@ class Agent:
                     delegation_budget=self.delegation_budget,
                     context_char_budget=min(self.context_char_budget, 12_000),
                     parent_memory=self.memory,
+                    max_completion_tokens=self.max_completion_tokens,
                 )
             else:
                 skill = skill_type(workspace_root=self.workspace_root)
@@ -239,6 +336,16 @@ class Agent:
             or self.workspace_root is None
         ):
             return
+        if os.getenv("AETHERIS_ENABLE_MCP", "").lower() not in {"1", "true", "yes"}:
+            try:
+                if configured_servers(str(self.workspace_root)):
+                    logger.info(
+                        "Workspace MCP servers are configured but disabled; "
+                        "review the config, then set AETHERIS_ENABLE_MCP=1 to start them."
+                    )
+            except (OSError, ValueError) as exc:
+                logger.warning("MCP configuration skipped: %s", exc)
+            return
         try:
             discovered = await discover_tools(str(self.workspace_root))
         except (MCPConnectionError, OSError, ValueError) as exc:
@@ -257,6 +364,23 @@ class Agent:
 
     async def _chat_locked(self, user_input: str) -> str:
         state = await self._ensure_state(user_input)
+        if state.pending_approval:
+            if state.should_pause():
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(
+                    state, "Budget reached before approved tool execution."
+                )
+                return self._pause_message(
+                    state, "Budget reached before approved tool execution."
+                )
+            try:
+                denied = await self._execute_tool_call(state.pending_approval, state)
+            except ApprovalRequired:
+                return await self._wait_for_approval(state.pending_approval, state)
+            if denied:
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(state, "Pending action rejected.")
+                return self._pause_message(state, "Pending action rejected.")
         await self.memory.recover_pending_tool_calls(state)
         await self.memory.add_message("user", user_input)
 
@@ -264,12 +388,15 @@ class Agent:
             if state.should_pause():
                 state.status = TaskStatus.PAUSED
                 state.human_review_pauses += 1
-                await self.memory.checkpoint(state, "Execution budget reached.")
-                return self._pause_message(state, "Execution budget reached.")
+                reason = (
+                    "Failure limit reached."
+                    if state.consecutive_failures >= 3
+                    else "Execution budget reached."
+                )
+                await self.memory.checkpoint(state, reason)
+                return self._pause_message(state, reason)
 
-            history = self._bounded_history(
-                await self.memory.get_history(), max_chars=self.context_char_budget
-            )
+            history = await self.memory.get_history()
             latest_user_message = next(
                 (
                     message.get("content", "")
@@ -281,16 +408,22 @@ class Agent:
             runtime_context = self._runtime_context(
                 state, f"{state.goal} {latest_user_message}"
             )
-            if history and history[0].get("role") == "system":
-                history[0] = {
-                    **history[0],
-                    "content": f"{history[0].get('content') or ''}\n\n{runtime_context}",
-                }
-            else:
-                history.insert(0, {"role": "system", "content": runtime_context})
+            history = self._bounded_history(
+                history,
+                max_chars=self.context_char_budget,
+                system_suffix=f"\n\n{runtime_context}",
+            )
 
             try:
-                response = await self._request_model(history)
+                self._emit_progress(
+                    "model_start",
+                    model=self.model_name,
+                    timeout_seconds=self.model_timeout_seconds,
+                )
+                response = await asyncio.wait_for(
+                    self._request_model_with_progress(history),
+                    timeout=self.model_timeout_seconds,
+                )
             except asyncio.CancelledError:
                 state.status = TaskStatus.PAUSED
                 await self.memory.checkpoint(
@@ -298,15 +431,21 @@ class Agent:
                 )
                 raise
             except Exception as exc:
+                error = (
+                    f"Model request timed out after {self.model_timeout_seconds:g} seconds."
+                    if isinstance(exc, TimeoutError)
+                    else str(exc)
+                )
                 state.record_step(
-                    "model_request", success=False, error=str(exc), is_tool_call=False
+                    "model_request", success=False, error=error, is_tool_call=False
                 )
                 state.status = TaskStatus.PAUSED
                 await self.memory.checkpoint(
-                    state, "Model request failed; task can be resumed."
+                    state, f"{error or 'Model request failed.'} Task can be resumed."
                 )
-                logger.warning("Model request failed: %s", exc)
-                return f"Task paused after a model request error: {exc}"
+                logger.warning("Model request failed: %s", error)
+                self._emit_progress("model_error", error=error)
+                return f"Task paused after a model request error: {error}"
 
             state.record_usage(self.tracker.add_usage(response))
             await self.memory.checkpoint(state, "Model usage recorded.")
@@ -324,6 +463,26 @@ class Agent:
                 await self.memory.checkpoint(state, error)
                 return self._pause_message(state, error)
 
+            if (
+                state.cost_estimate_available
+                and state.estimated_cost_usd is not None
+                and state.estimated_cost_usd >= state.cost_budget_usd
+            ):
+                reason = "Estimated cost budget was reached by the last model request."
+                if tool_calls:
+                    await self.memory.add_message(
+                        "assistant", message.content, tool_calls=tool_calls
+                    )
+                    return await self._pause_before_tool_calls(
+                        tool_calls, state, reason
+                    )
+                reply = message.content or ""
+                if reply:
+                    await self.memory.add_message("assistant", reply)
+                state.status = TaskStatus.PAUSED
+                await self.memory.checkpoint(state, reason)
+                return self._pause_message(state, reason)
+
             if not tool_calls:
                 reply = message.content or ""
                 if not reply.strip():
@@ -335,6 +494,17 @@ class Agent:
                     await self.memory.checkpoint(state, error)
                     return self._pause_message(state, error)
                 await self.memory.add_message("assistant", reply)
+                if self._looks_like_unparsed_tool_call(reply):
+                    error = (
+                        "Model returned a function-call payload as plain text; "
+                        "the requested tool was not executed."
+                    )
+                    state.record_step(
+                        "model_response", success=False, error=error, is_tool_call=False
+                    )
+                    state.status = TaskStatus.PAUSED
+                    await self.memory.checkpoint(state, error)
+                    return self._pause_message(state, error)
                 state.status = TaskStatus.COMPLETED
                 await self.memory.checkpoint(state, "Task completed.")
                 return reply
@@ -344,15 +514,77 @@ class Agent:
                 message.content,
                 tool_calls=tool_calls,
             )
+            if message.content:
+                self._emit_progress("model_plan", text=message.content)
 
+            batch_signatures = set()
             for index, tool_call in enumerate(tool_calls):
                 if state.should_pause():
                     return await self._pause_before_tool_calls(
                         tool_calls[index:], state, "Execution budget reached."
                     )
 
+                signature = self._tool_call_signature(tool_call)
+                if (
+                    signature in batch_signatures
+                    or signature in state.recent_tool_signatures
+                ):
+                    name = tool_call["function"]["name"]
+                    reason = "Repeated tool call was not executed; use the earlier observation."
+                    history = await self.memory.get_history()
+                    matching_ids = {
+                        call["id"]
+                        for item in history
+                        for call in item.get("tool_calls", []) or []
+                        if call["id"] != tool_call["id"]
+                        and self._tool_call_signature(call) == signature
+                    }
+                    prior = next(
+                        (
+                            item
+                            for item in reversed(history)
+                            if item.get("role") == "tool"
+                            and item.get("tool_call_id")
+                            and item.get("tool_call_id") in matching_ids
+                            and item.get("content")
+                        ),
+                        None,
+                    )
+                    observation = (
+                        f"{reason}\nPrevious result:\n{prior['content']}"
+                        if prior
+                        else f"{reason} No earlier result is available; choose a different action."
+                    )
+                    state.record_step(name, success=True, error=None)
+                    state.last_action = "duplicate_tool_blocked"
+                    await self.memory.checkpoint(
+                        state,
+                        "Blocked a repeated tool call without re-executing it.",
+                        tool_results=[
+                            {
+                                "name": name,
+                                "tool_call_id": tool_call["id"],
+                                "content": observation,
+                            }
+                        ],
+                    )
+                    self._emit_progress("tool_repeat", name=name)
+                    # Reuse this observation, but do not discard unrelated siblings.
+                    # Repeats still consume steps, so an endless loop is bounded.
+                    continue
+                batch_signatures.add(signature)
+
                 try:
+                    self._emit_progress(
+                        "tool_start",
+                        name=tool_call["function"]["name"],
+                        arguments=self._safe_progress_arguments(tool_call),
+                    )
                     approval_denied = await self._execute_tool_call(tool_call, state)
+                except ApprovalRequired:
+                    return await self._wait_for_approval(
+                        tool_call, state, tool_calls[index + 1 :]
+                    )
                 except asyncio.CancelledError:
                     state.status = TaskStatus.PAUSED
                     await self.memory.checkpoint(
@@ -383,6 +615,12 @@ class Agent:
                         "Tool approval was denied; no further calls were executed.",
                     )
 
+                self._emit_progress(
+                    "tool_done" if state.last_error is None else "tool_failed",
+                    name=tool_call["function"]["name"],
+                    error=state.last_error,
+                )
+
                 if state.consecutive_failures > 0 or state.step_count % 5 == 0:
                     decision = await self._decide(state)
                     if decision.action == "pause":
@@ -390,6 +628,72 @@ class Agent:
                         state.human_review_pauses += 1
                         await self.memory.checkpoint(state, decision.reason)
                         return self._pause_message(state, decision.reason)
+
+    def _emit_progress(self, event: str, **details: Any) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event, redact(details))
+        except Exception:
+            logger.exception("Progress callback failed for event %s", event)
+
+    async def _wait_for_approval(
+        self,
+        call: dict[str, Any],
+        state: TaskState,
+        skipped: list[dict[str, Any]] | None = None,
+    ) -> str:
+        state.pending_approval = call
+        state.status = TaskStatus.PAUSED
+        state.human_review_pauses += 1
+        state.last_action = "waiting_for_approval"
+        await self.memory.checkpoint(
+            state,
+            "Waiting for explicit tool approval.",
+            tool_results=[
+                {
+                    "name": item["function"]["name"],
+                    "tool_call_id": item["id"],
+                    "content": "Error: sibling call skipped while waiting for approval.",
+                }
+                for item in skipped or []
+            ],
+        )
+        self._emit_progress(
+            "approval_required",
+            name=call["function"]["name"],
+            arguments=self._safe_progress_arguments(call),
+        )
+        return f"Waiting for approval of {call['function']['name']}. This action has not executed."
+
+    @staticmethod
+    def _safe_progress_arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
+        try:
+            arguments = json.loads(tool_call["function"].get("arguments") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {"arguments": "<invalid; redacted>"}
+        if not isinstance(arguments, dict):
+            return {"arguments": "<redacted>"}
+        name = tool_call["function"].get("name")
+        allowed = {
+            "list_directory": {"path"},
+            "read_file": {"filepath"},
+            "search_code": {"pattern", "extension", "max_results"},
+            "inspect_workspace": set(),
+            "run_command": {"command"},
+            "write_file": {"filepath"},
+            "edit_file": {"filepath"},
+            "web_search": {"query", "max_results", "domains"},
+            "delegate_task": {"role", "task", "max_steps"},
+            "remember": {"title"},
+            "recall": {"query"},
+            "use_skill": {"name"},
+        }.get(name, set())
+        safe = {key: value for key, value in arguments.items() if key in allowed}
+        for key, value in safe.items():
+            if isinstance(value, str):
+                safe[key] = value[:160]
+        return safe
 
     async def _ensure_state(self, goal: str) -> TaskState:
         state = await self.memory.load_state()
@@ -416,6 +720,9 @@ class Agent:
         return state
 
     async def _decide(self, state: TaskState):
+        # A secondary model may pause earlier, but cannot waive this hard stop.
+        if state.consecutive_failures >= 3:
+            return await HeuristicPolicy().decide(state)
         try:
             return await self.policy.decide(state)
         except Exception as exc:
@@ -423,6 +730,21 @@ class Agent:
                 "Decision policy failed; applying deterministic policy: %s", exc
             )
             return await HeuristicPolicy().decide(state)
+
+    async def _request_model_with_progress(self, history: list[dict[str, Any]]) -> Any:
+        async def report_wait() -> None:
+            elapsed = 0
+            while True:
+                await asyncio.sleep(5)
+                elapsed += 5
+                self._emit_progress("model_wait", elapsed_seconds=elapsed)
+
+        reporter = asyncio.create_task(report_wait())
+        try:
+            return await self._request_model(history)
+        finally:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
 
     async def _request_model(self, history: list[dict[str, Any]]) -> Any:
         # Keep provider-specific wire formats behind this boundary. The rest
@@ -432,6 +754,9 @@ class Agent:
                 model=self.model_name,
                 messages=history,
                 tools=self._tool_schemas(),
+                max_tokens=self.max_completion_tokens,
+                timeout=self.model_timeout_seconds,
+                num_retries=0,
             )
         return await self._request_responses_api(history)
 
@@ -484,6 +809,7 @@ class Agent:
                 instructions=system,
                 input=input_items,
                 tools=self._responses_tools(),
+                max_output_tokens=self.max_completion_tokens,
             )
         finally:
             await client.close()
@@ -564,11 +890,31 @@ class Agent:
                         arguments
                     ).model_dump()
                 approved = not skill.requires_confirmation
-                if skill.requires_confirmation:
+                session_approved = self.session_approval and name in {
+                    "run_command",
+                    "write_file",
+                    "edit_file",
+                    "remember",
+                    "web_search",
+                }
+                if session_approved:
+                    approved = True
+                elif skill.requires_confirmation:
                     try:
-                        approved = await skill.confirm(arguments)
+                        approved = await (
+                            self.approval_callback(skill, arguments)
+                            if self.approval_callback
+                            else skill.confirm(arguments)
+                        )
+                    except ApprovalRequired:
+                        raise
                     except Exception:
                         approved = False
+                if state.pending_approval and state.pending_approval["id"] == call_id:
+                    state.pending_approval = None
+                    await self.memory.checkpoint(
+                        state, "Pending approval resolved; tool outcome still pending."
+                    )
                 if not approved:
                     result = "Error: tool execution was not approved or approval was unavailable."
                     state.record_step(name, success=False, error=result)
@@ -590,6 +936,8 @@ class Agent:
                         success=success,
                         error=None if success else result,
                     )
+            except ApprovalRequired:
+                raise
             except ValidationError as exc:
                 result = f"Error: invalid arguments for {name}: {exc}"
                 state.record_step(name, success=False, error=result)
@@ -597,12 +945,63 @@ class Agent:
                 result = f"Error: tool execution failed: {exc}"
                 state.record_step(name, success=False, error=result)
 
+        if state.last_error is None:
+            signature = self._tool_call_signature(tool_call)
+            if name not in READ_ONLY_SKILLS:
+                state.recent_tool_signatures.clear()
+            state.recent_tool_signatures.append(signature)
+            del state.recent_tool_signatures[:-MAX_RECENT_TOOL_SIGNATURES]
+
         await self.memory.checkpoint(
             state,
             f"Recorded tool call {call_id}.",
             tool_results=[{"name": name, "tool_call_id": call_id, "content": result}],
         )
+        if name == "run_command":
+            self._emit_progress("tool_output", name=name, preview=result[:1500])
         return approval_denied
+
+    @staticmethod
+    def _tool_call_signature(tool_call: dict[str, Any]) -> str:
+        function = tool_call["function"]
+        arguments = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, json.JSONDecodeError):
+            pass
+        serialized = json.dumps(
+            [function["name"], arguments],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode()).hexdigest()
+
+    @staticmethod
+    def _looks_like_unparsed_tool_call(content: str) -> bool:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+
+        def contains_call(value: Any, depth: int = 0) -> bool:
+            if isinstance(value, dict):
+                if (
+                    value.get("type") == "function"
+                    and isinstance(value.get("function"), dict)
+                    and isinstance(value["function"].get("name"), str)
+                    and "arguments" in value["function"]
+                ):
+                    return True
+                return depth < 3 and any(
+                    contains_call(item, depth + 1) for item in value.values()
+                )
+            if isinstance(value, list):
+                return depth < 3 and any(
+                    contains_call(item, depth + 1) for item in value
+                )
+            return False
+
+        return contains_call(payload)
 
     async def _pause_before_tool_calls(
         self, tool_calls: list[dict[str, Any]], state: TaskState, reason: str
@@ -626,19 +1025,36 @@ class Agent:
             if state.cost_estimate_available and state.estimated_cost_usd is not None
             else "unavailable for this provider"
         )
-        knowledge = self.knowledge.context(query)
+        knowledge = self.knowledge.context(query, char_limit=1_000)
         knowledge_block = (
             f"\nRelevant durable project knowledge:\n{knowledge}" if knowledge else ""
         )
+        goal = state.goal
+        if len(goal) > 800:
+            goal = goal[:388] + "\n[goal excerpt omitted]\n" + goal[-388:]
+        last_error = state.last_error or "none"
+        if len(last_error) > 400:
+            last_error = (
+                last_error[:190] + "\n[error excerpt omitted]\n" + last_error[-190:]
+            )
+        workspace = str(self.workspace_root) if self.workspace_root is not None else ""
+        if len(workspace) > 256:
+            workspace = workspace[-256:]
+        workspace_block = (
+            f"- workspace root: {workspace}; use relative paths inside it\n"
+            if workspace
+            else ""
+        )
         return (
             "Runtime state (authoritative and compact):\n"
-            f"- task: {state.goal}\n"
+            f"{workspace_block}"
+            f"- task: {goal}\n"
             f"- status: {state.status.value}\n"
             f"- steps: {state.step_count}/{state.max_steps}\n"
             f"- cost: {cost}; budget: ${state.cost_budget_usd:.2f}\n"
             f"- consecutive failures: {state.consecutive_failures}\n"
             f"- last action: {state.last_action or 'none'}\n"
-            f"- last error: {state.last_error or 'none'}\n"
+            f"- last error: {last_error}\n"
             f"- tool calls/failures: {state.tool_calls}/{state.tool_failures}\n"
             f"- sub-agent sessions/failures: {state.subagent_sessions}/{state.subagent_failures}\n"
             f"- sub-agent tokens: {state.subagent_prompt_tokens}/{state.subagent_completion_tokens}\n"
@@ -647,66 +1063,12 @@ class Agent:
             f"{knowledge_block}"
         )
 
-    @staticmethod
-    def _bounded_history(
-        history: list[dict[str, Any]], max_messages: int = 40, max_chars: int = 24_000
-    ) -> list[dict[str, Any]]:
-        system = history[:1] if history and history[0].get("role") == "system" else []
-        recent = history[len(system) :][-max_messages:]
-        tool_result_ids = {
-            message.get("tool_call_id")
-            for message in recent
-            if message.get("role") == "tool" and message.get("tool_call_id")
-        }
-        valid_call_ids = set()
-        filtered = []
-        for message in recent:
-            calls = message.get("tool_calls") or []
-            if message.get("role") == "assistant" and calls:
-                ids = {call.get("id") for call in calls}
-                if not ids or not ids.issubset(tool_result_ids):
-                    continue
-                valid_call_ids.update(ids)
-            elif message.get("role") == "tool":
-                if message.get("tool_call_id") not in tool_result_ids:
-                    continue
-            filtered.append(dict(message))
-
-        filtered = [
-            message
-            for message in filtered
-            if message.get("role") != "tool"
-            or message.get("tool_call_id") in valid_call_ids
-        ]
-        bounded_system = [dict(system[0])] if system else []
-        messages = bounded_system + filtered
-
-        def clip(value: str, limit: int) -> str:
-            if len(value) <= limit:
-                return value
-            marker = "\n[older context omitted]\n"
-            if limit <= len(marker):
-                return value[:limit]
-            half = max(0, (limit - len(marker)) // 2)
-            return value[:half] + marker + value[-half:]
-
-        for message in messages:
-            if isinstance(message.get("content"), str):
-                message["content"] = clip(message["content"], 4_000)
-
-        remaining = max_chars
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, str):
-                continue
-            allowance = min(len(content), remaining)
-            message["content"] = clip(content, allowance) if allowance else ""
-            remaining = max(0, remaining - len(message["content"]))
-        return messages
+    _bounded_history = staticmethod(bounded_history)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
         serialized: list[dict[str, Any]] = []
+        call_ids: set[str] = set()
         for call in tool_calls or []:
             function = getattr(call, "function", None)
             raw_arguments = getattr(function, "arguments", "{}")
@@ -719,11 +1081,14 @@ class Agent:
             except (TypeError, ValueError):
                 arguments = "null"
             call_id = getattr(call, "id", None)
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError("Tool call is missing a valid provider call ID.")
+            if call_id in call_ids:
+                raise ValueError(f"Duplicate provider tool call ID: {call_id}.")
+            call_ids.add(call_id)
             serialized.append(
                 {
-                    "id": call_id
-                    if isinstance(call_id, str) and call_id
-                    else uuid.uuid4().hex,
+                    "id": call_id,
                     "type": "function",
                     "function": {
                         "name": getattr(function, "name", "") or "",

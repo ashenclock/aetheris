@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -48,15 +49,22 @@ class BaseSkill(ABC):
     def requires_confirmation(self) -> bool:
         return False
 
+    @staticmethod
+    def _ask_confirmation(prompt: str) -> bool:
+        if not sys.stdin.isatty():
+            return False
+        try:
+            from rich.prompt import Confirm
+            from rich.text import Text
+
+            return Confirm.ask(Text(prompt))
+        except (EOFError, KeyboardInterrupt):
+            return False
+
     async def confirm(self, arguments: dict[str, Any]) -> bool:
         if not self.requires_confirmation:
             return True
-        try:
-            from rich.prompt import Confirm
-
-            return Confirm.ask(f"Approve {self.name}({arguments})?")
-        except (EOFError, KeyboardInterrupt):
-            return False
+        return self._ask_confirmation(f"Approve {self.name}({arguments})?")
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str: ...

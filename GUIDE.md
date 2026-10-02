@@ -1,380 +1,93 @@
-# Aetheris hands-on guide
+# Aetheris quick guide
 
-This guide is for testing the runtime with real tasks while keeping the
-workspace, model credentials, and side effects explicit.
+## Start a chat
 
-## 1. Choose a model
-
-The offline evaluator needs no model or API key:
+From the repository, activate the installed environment:
 
 ```bash
+source .venv/bin/activate
+aetheris chat --model deepseek/deepseek-chat --workspace . --session chat
+```
+
+The CLI loads the ignored `.env`. Configure the relevant provider key there,
+never in a prompt. `aetheris providers` lists configuration without exposing
+credentials. For Ollama, use an installed model reported by `ollama list`.
+The model may take time; activity displays tool requests, results, provider
+waits, and model-authored plans—not private chain-of-thought.
+
+## Chat controls (terminal and web)
+
+| Command | Meaning |
+| --- | --- |
+| `/` or `/help` | List commands; terminal also autocompletes |
+| `/status` | Saved state, budgets, failures |
+| `/resume` | List saved sessions |
+| `/resume NAME` | Continue the same task |
+| `/new NAME` | Select a session |
+| `/model PROVIDER/MODEL` | Switch in a fresh session |
+| `/provider` | Inspect configured providers |
+| `/permissions` | Inspect approval mode |
+| `/permissions session` | Auto-approve ordinary tools for this chat |
+| `/permissions ask` | Restore per-action approval |
+| `/wiki` | Durable Markdown facts and their links |
+| `/trace` | Recent tool-call IDs and checkpoints |
+| `/skills`, `/mcp` | Inspect local extensions |
+| `/exit` | Exit without deleting saved state |
+
+Session approval includes shell, file writes, and wiki writes. It is **not a
+sandbox**; use only in a disposable trusted workspace. Sensitive reads and MCP
+still need explicit approval. Approval grants are not saved across restarts.
+
+A paused task keeps its original goal and usage. Increase the step allowance
+before resuming if needed; resume does not silently replenish the cost budget.
+
+## Streamlit
+
+```bash
+AETHERIS_WEB_LOCAL=1 streamlit run streamlit_app.py
+```
+
+Open http://localhost:8501. Click **Open local workspace** for CLI-like coding.
+The configured root defaults to the working directory; set
+`AETHERIS_WEB_WORKSPACE` to constrain folder selection. Local mode loads `.env`.
+Shell/edit tools pause for **Approve once** or **Reject**, unless explicitly
+enabled with `/permissions session`.
+
+Without `AETHERIS_WEB_LOCAL=1`, the UI only downloads public GitHub archives
+and explores them read-only. This is a snapshot, not a clone or pull: local
+uncommitted changes and Git metadata are absent. The runtime itself comes from
+the installed local application, not the downloaded repository.
+
+The UI displays activity as it happens, saved state, a checkpoint timeline,
+and the wiki graph. `[[topic]]` links connect Markdown pages. Ask the agent to
+remember a decision with its source; wiki writes use the normal approval gate.
+The wiki is not an automatically verified source of truth.
+
+## One practical task
+
+Use a separate workspace and ask:
+
+> Build a seeded scikit-learn classification pipeline using synthetic data.
+> Split before fitting preprocessing. Log held-out metrics in local MLflow.
+> Add separate feature-drift and concept-drift simulations, tests, and a small
+> Streamlit results viewer. Keep files here; do not push or publish anything.
+> Run the tests and report measured results and limitations.
+
+Review proposed installations and commands. Do not confuse a model's final
+answer with verified success: inspect files, test output, state, and metrics.
+
+## Deterministic verification
+
+```bash
+python -m pytest -q
+python evals/run.py
 python evals/demo.py
-python evals/run.py --output /tmp/aetheris-evaluation.json
 ```
 
-Run the read-only environment check before a live session:
-
-```bash
-aetheris doctor --workspace .
-```
-
-It reports provider credentials without printing their values, optional SDKs,
-the workspace, child routing, Streamlit, and Docker CLI availability. It does
-not install packages or silently change providers.
-
-To inspect provider options without making network calls:
-
-```bash
-aetheris providers
-```
-
-To exercise every provider for which a key is configured, run the explicit
-live smoke test. It makes one short request per selected model and returns
-JSON with status, latency, and provider-reported token usage:
-
-```bash
-python evals/providers.py                  # plan only
-python evals/providers.py --live           # configured providers only
-python evals/providers.py --live \
-  --model openai/gpt-4o-mini \
-  --model deepseek/deepseek-chat \
-  --model gemini/gemini-2.5-flash \
-  --model openrouter/openai/gpt-4o-mini
-```
-
-The live command is intentionally opt-in. It does not rotate keys, discover
-models over the network, or silently fall back to another provider. Record the
-model, result, latency, tokens, and cost separately for a real comparison.
-
-For a local Ollama model, start Ollama separately and pull a model that is
-available on the machine:
-
-```bash
-ollama serve
-ollama pull llama3
-```
-
-For the hosted OpenAI Responses adapter, keep the key in the uncommitted
-`.env` file:
-
-```bash
-cp .env.example .env
-# Edit .env and set OPENAI_API_KEY and AETHERIS_MODEL.
-# Example: AETHERIS_MODEL=responses/codex-mini-latest
-```
-
-The CLI loads `.env`. An explicit `--model` argument always takes precedence.
-Never put a key in a task prompt, repository file, slide, or git commit.
-
-Child routing is explicit and conservative:
-
-```env
-# Empty means inherit the parent provider/model.
-AETHERIS_SUBAGENT_MODEL=ollama/llama3.2:3b
-AETHERIS_SUBAGENT_BUDGET_USD=0.25
-AETHERIS_MAX_SUBAGENTS=2
-AETHERIS_CONTEXT_CHARS=24000
-```
-
-The parent reserves a shared child budget before starting a child. Child
-sessions use their own SQLite session IDs (`parent:subagent:N`) and a shorter
-context. If provider pricing is unavailable, the reservation is treated as
-spent. This is intentionally explicit rather than an invisible provider switch.
-
-## 1.5 Use plan-first goals and project extensions
-
-For a real task, start with a read-only plan and save it beside the project:
-
-```bash
-aetheris plan "Review this repository and propose the smallest safe change" \
-  --workspace "$PWD" --session review-plan \
-  --output .aetheris/plans/review-plan.md
-
-aetheris goal "Repair the failing tests" --plan-first --workspace "$PWD"
-```
-
-`goal` prints the execute command after the plan. Review the files and risks
-before starting `aetheris run`. A plan is a proposal, not proof that the task
-has been implemented or deployed. Use `--json` on `plan`, `run`, and `resume`
-when another script needs the reply and authoritative state.
-
-Create local, reviewable extensions without editing the installed package:
-
-```bash
-aetheris skill create reviewer --workspace .
-aetheris agent create security --workspace .
-aetheris skill list --workspace .
-aetheris agent list --workspace .
-```
-
-Project profiles and skills are prompt guidance. They cannot grant tools,
-disable approvals, or override the system prompt.
-
-Register and test a local MCP stdio server:
-
-```bash
-aetheris mcp add local-demo --command "python tests/fixtures/mcp_demo_server.py" \
-  --workspace .
-aetheris mcp validate --workspace .
-aetheris mcp test --workspace .
-aetheris mcp list --workspace .
-```
-
-`mcp test` launches the process and performs initialization plus tool discovery.
-In execute mode each discovered tool is approval-gated. Plan mode does not
-start MCP processes. MCP descriptions and server instructions are untrusted
-data, and the local adapter is not a sandbox.
-
-## 1.6 Search the web explicitly
-
-Web search is a first-class skill with a different boundary from shell
-execution. It asks for approval, limits the result count, supports domain
-filters, and returns only title/URL/snippet observations. The default `ddgs`
-backend is keyless; `BRAVE_SEARCH_API_KEY` switches to Brave Search API.
-
-```bash
-uv sync --extra search
-aetheris search "Python asyncio documentation" \
-  --domain python.org --max-results 3
-```
-
-The snippets are untrusted external data. They do not override the system
-prompt and are not executed as commands. To let the agent request search
-inside a live `chat` or `run`, say explicitly that it may use `web_search`;
-Aetheris asks for approval at the tool boundary. Plan mode exposes the
-read-only search schema, but cannot execute the search without approval.
-
-For the Streamlit demo, use the sidebar's **Search the public web** button. The
-button is the UI approval gate, and its result is displayed as code rather than
-injected into the repository-analysis conversation.
-
-## 2. Observe a task from another terminal
-
-Use a dedicated database and session for every experiment:
-
-```bash
-STATE_DB="$PWD/.aetheris-web.sqlite3"
-WORKSPACE="$PWD/.demo-workspaces/web"
-mkdir -p "$WORKSPACE"
-```
-
-In terminal A, run the task:
-
-```bash
-aetheris run "Inspect the empty workspace and explain what you would build. Do not edit files yet." \
-  --workspace "$WORKSPACE" \
-  --db "$STATE_DB" \
-  --session web-demo \
-  --max-steps 8 \
-  --cost-budget 0.25
-```
-
-In terminal B, inspect the authoritative state while it runs:
-
-```bash
-aetheris status --db "$STATE_DB" --session web-demo --json
-```
-
-To poll every two seconds on macOS or Linux:
-
-```bash
-while true; do
-  clear
-  date
-  aetheris status --db "$STATE_DB" --session web-demo
-  sleep 2
-done
-```
-
-The status shows the session, status, step budget, tool calls, failures,
-checkpoints, last action, and last error. A paused task is not automatically
-lost; use the same database and session to resume it.
-
-For a lower-level protocol trace, SQLite is intentionally inspectable:
-
-```bash
-sqlite3 "$STATE_DB" \
-  "select id,role,name,tool_call_id,substr(content,1,120) from messages where session_id='web-demo' order by id;"
-sqlite3 "$STATE_DB" \
-  "select id,timestamp,reason from checkpoints where session_id='web-demo' order by id;"
-```
-
-## 3. Build a small web project
-
-Use `chat` when you want to see the agent's steps and approve file edits or
-shell commands interactively. Use a disposable workspace and never point a
-first experiment at an important repository:
-
-```bash
-WORKSPACE="$PWD/.demo-workspaces/web"
-STATE_DB="$PWD/.aetheris-web.sqlite3"
-mkdir -p "$WORKSPACE"
-
-aetheris chat \
-  --workspace "$WORKSPACE" \
-  --db "$STATE_DB" \
-  --session web-demo \
-  --max-steps 30 \
-  --cost-budget 0.50
-```
-
-Paste this task into the chat:
-
-```text
-Build a minimal static web project in the current workspace.
-
-Constraints:
-- First inspect the workspace and propose a short plan.
-- Use plain HTML, CSS, and JavaScript; do not add a framework.
-- Create a responsive landing page with one small interactive feature.
-- Keep every file inside the workspace.
-- Do not install packages, access private data, push git commits, or deploy to a public service.
-- After editing, run a deterministic local check and explain the result.
-- Before any shell command, show the exact command and wait for approval.
-```
-
-When Aetheris asks for approval, review the exact file or command. Approve
-small writes and harmless checks; reject package installation, destructive
-commands, credentials, or unexplained network access.
-
-After the task:
-
-```bash
-aetheris status --db "$STATE_DB" --session web-demo
-find "$WORKSPACE" -maxdepth 2 -type f -print
-python -m http.server 8000 --directory "$WORKSPACE"
-```
-
-Open <http://127.0.0.1:8000>. If the task pauses or stops at its step limit,
-continue it without changing the database or session:
-
-```bash
-aetheris resume web-demo \
-  "Review the current files, run the local check, and fix only the smallest confirmed issue." \
-  --workspace "$WORKSPACE" \
-  --db "$STATE_DB" \
-  --max-steps 15
-```
-
-When resuming a paused task, a larger `--max-steps` value extends the persisted
-step allowance; a smaller value never reduces it. The persisted cost budget is
-not silently increased by resume.
-
-## 4. Add a local container build
-
-Only after reviewing the generated files, ask for a container artifact:
-
-```text
-Add a minimal Dockerfile for this static site using a small non-root web server.
-Do not build or run it yet. Explain the base image, exposed port, and security assumptions.
-```
-
-Then approve the build explicitly:
-
-```text
-Run a local Docker build and a short container smoke test. Do not push the image,
-publish it, or change files outside the current workspace.
-```
-
-Docker is a packaging boundary, not automatically a complete sandbox. For a
-public agent, use isolated workers, restricted credentials, network policy, and
-an approval identity in addition to a non-root image.
-
-## 5. Build a small MLflow pipeline
-
-Use a separate workspace and database:
-
-```bash
-ML_WORKSPACE="$PWD/.demo-workspaces/mlflow"
-ML_DB="$PWD/.aetheris-mlflow.sqlite3"
-mkdir -p "$ML_WORKSPACE"
-aetheris chat \
-  --workspace "$ML_WORKSPACE" \
-  --db "$ML_DB" \
-  --session mlflow-demo \
-  --max-steps 40 \
-  --cost-budget 0.75
-```
-
-Use this prompt. It intentionally separates implementation from installation
-and network access:
-
-```text
-Create a small, reproducible binary-classification pipeline in this workspace.
-
-Requirements:
-- Use scikit-learn and MLflow.
-- Download one public tabular dataset only after showing the exact URL or
-  sklearn dataset loader and asking for approval.
-- Split by the dataset's normal sample units, fit a baseline model, and report
-  accuracy, macro F1, and ROC AUC where valid.
-- Log parameters, metrics, the model, and a README to a local ./mlruns store.
-- Write src/train.py, requirements.txt, and a short README with a seed.
-- Do not use credentials, private medical data, cloud tracking, or a public
-  deployment.
-- Do not run pip install yet. First create the files and explain the commands
-  needed to install and execute them.
-```
-
-Review the generated code and requirements. If the dependencies are acceptable,
-approve the installation explicitly:
-
-```text
-Install only the packages listed in requirements.txt into an isolated virtual
-environment, then run the training script. Do not modify the system Python.
-```
-
-After the run, inspect both Aetheris and MLflow state:
-
-```bash
-aetheris status --db "$ML_DB" --session mlflow-demo --json
-find "$ML_WORKSPACE" -maxdepth 3 -type f -print
-mlflow ui --backend-store-uri "$ML_WORKSPACE/mlruns" --host 127.0.0.1 --port 5000
-```
-
-Open <http://127.0.0.1:5000> only after confirming the tracking directory is
-local and contains no sensitive data. For the interview, show the experiment
-directory, the training script, the recorded metrics, and the Aetheris
-checkpoints; do not present a metric as meaningful without describing the
-dataset and split.
-
-## 6. Test delegation explicitly
-
-Start a normal parent session and ask it to use the built-in `delegate_task`
-skill for a bounded read-only question:
-
-```text
-Delegate one read-only research task to a child agent: inspect the repository
-layout and identify the three files most relevant to the current goal. Return
-file paths, evidence, and unresolved risks. Do not delegate again.
-```
-
-The child inherits the parent provider/model unless `AETHERIS_SUBAGENT_MODEL`
-is set. Inspect the parent state:
-
-```bash
-aetheris status --db "$STATE_DB" --session web-demo --json
-sqlite3 "$STATE_DB" \
-  "select session_id,state_json from task_state where session_id like 'web-demo:subagent:%';"
-```
-
-The parent state exposes child sessions, child failures, child token totals,
-and the durable child budget ledger. A second delegation is denied when the
-configured child count or shared budget is exhausted.
-
-## 7. Failure experiments
-
-These are useful demonstrations because they make the runtime behavior visible:
-
-1. Set `--max-steps 1` and observe a deterministic stop.
-2. Give an invalid model name and inspect the paused state and `last_error`.
-3. Interrupt a run during a tool request, then call `aetheris resume` with the
-   same database and session. Inspect `recovered_interrupted_calls`.
-4. Ask for a destructive command and reject the approval. Confirm that the
-   command was not executed and that the failure is persisted.
-5. Run the offline evaluator and compare its JSON result with the SQLite
-   checkpoints.
-
-The important distinction is that checkpoints preserve runtime state; they do
-not make an already-started external side effect exactly once, and they do not
-prove that the model made a good engineering decision.
+These run without paid API calls. They verify runtime behavior, not model
+quality. Live provider smoke tests are explicit:
+`python evals/providers.py --live`.
+
+Other interfaces are discoverable with `aetheris --help`. Optional search,
+transcription, MCP, API, and deployment are separate adapters—not prerequisites
+for chat. See `README.md` and `deploy/k3s/README.md` for their boundaries.

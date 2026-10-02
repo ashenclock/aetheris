@@ -68,19 +68,32 @@ interaction: the assistant call and its matching `tool` result use the same
 ## State model
 
 `TaskState` is deliberately small. It contains the session ID, original goal,
-status, step and cost limits, failure counters, last action/error, tool and
-token counters, recovery and approval counters, and checkpoint count. The model
+status, step and cost limits, failure counters, last action/error, bounded
+hashes of recent successful tool calls, tool/token counters, recovery and
+approval counters, and checkpoint count. The model
 cannot change these values directly. The current statuses are `running`,
 `paused`, `completed`, and `failed`.
 
 `completed` means the model returned a non-empty final response. The generic
 runtime cannot prove that every user goal was achieved; task-specific tests,
 artifact checks, or a human review provide that verification.
+The CLI and Streamlit therefore label this state “model finished; goal
+unverified” rather than presenting it as a verified success. JSON keeps the
+raw `status` and adds a derived `status_label` for the same distinction.
+One-shot commands preserve any existing transcript and create a fresh session
+ID for the next task; only `resume` continues paused/running work, and it rejects
+completed or missing sessions. A zero CLI exit means
+the model returned a final answer, not that an external oracle verified it.
 
-Step limits always work. Cost limits work when the provider exposes a finite
-LiteLLM cost estimate. A response can cross the configured cost budget before
-the next checkpoint, so a provider-side spend limit would still be required for
-a hard financial ceiling.
+Step limits are deterministic. Cost limits use LiteLLM estimates when available:
+if one request crosses the threshold, Aetheris records the response, blocks any
+associated tool calls, and pauses. That already-issued request cannot be undone,
+so this is a soft task budget, not a hard financial ceiling; provider-side spend
+limits are still needed for that.
+
+Shell output is drained while only a small bounded byte prefix is retained, so
+large stdout/stderr cannot grow the runtime's captured output without limit.
+This does not limit the command's CPU, disk, or network use.
 
 ## Checkpoint and resume example
 
@@ -119,11 +132,15 @@ problem, not before.
 
 ## Native web search
 
-`web_search` is an explicit skill, separate from `run_command`. It uses a
-bounded DDGS adapter by default or the Brave Search API when a key is supplied,
-asks for approval, applies optional domain filters, and stores the result as a
-normal tool observation. Titles and snippets are untrusted excerpts; they are
-not proof that a page was opened and cannot change policy or trigger commands.
+`web_search` is an explicit skill, separate from `run_command`. It uses the
+single-backend DDGS adapter (DuckDuckGo by default) or the Brave Search API only
+when selected explicitly, asks for approval, applies optional domain filters,
+and stores the result as a normal tool observation. Titles and snippets are
+untrusted excerpts; they are not proof that a page was opened and cannot change
+policy or trigger commands. A Brave key alone does not select that API; the
+backend must be chosen explicitly or through operator configuration. DDGS
+requests have an HTTP timeout, but coroutine cancellation is not thread
+cancellation.
 The Streamlit surface exposes the same operation behind a button but keeps it
 out of the hosted repository-agent tool set.
 
@@ -153,9 +170,11 @@ untrusted configuration: they cannot add tools or weaken runtime policy.
 `aetheris mcp add` stores a local command in `.aetheris/mcp.json`; `mcp test`
 actually starts it and performs MCP initialization and tool discovery. In
 execute mode, discovered tools become explicit skills named
-`mcp__server__tool` and require confirmation for every call. Plan mode does
-not start external MCP processes. This keeps the integration useful for local
-CLI experiments while keeping the Streamlit demo read-only.
+`mcp__server__tool` and require confirmation for every call. Normal agent
+startup only discovers them when `AETHERIS_ENABLE_MCP=1` is explicitly set;
+`mcp test` is the direct opt-in smoke command. Plan mode never starts external
+MCP processes. This prevents merely opening an untrusted repository from
+launching its configured server command; it is still not OS-level isolation.
 
 ## Human approval and security
 
@@ -170,15 +189,49 @@ filesystem and network policy, identity-aware approvals, and audit logs.
 
 `evals/tasks.jsonl` covers symbol search, file reading, a deterministic edit
 followed by a test, one transient failure, approval denial, interrupted-call
-recovery, and remember/recall. The scripted model uses the real `Agent` loop and
+recovery, remember/recall, and an identical-tool-call loop. The scripted model uses the real `Agent` loop and
 real skills. It measures status, steps, tool calls, failures, recovery,
 approval pauses, tokens, latency, and checkpoints. Mock cost is intentionally
 `null`; these results test runtime control flow, not model quality.
 
-The latest measured run was 7/7 successful tasks, 10 tool calls, 3 controlled
-tool failures, 2 recovery cases, 1 approval pause, 150 prompt tokens, and 75
-completion tokens. Latency is machine-dependent. A separate multiprocessing
+The latest measured run was 8/8 successful evaluator cases, 12 tool calls, 3
+controlled tool failures, 2 recovery cases, 1 approval pause, 180 prompt
+tokens, and 90 completion tokens. The repeat case reuses the prior observation
+without re-executing the tool. Latency is machine-dependent. A separate multiprocessing
 test verifies same-session exclusion and lock release after process termination.
+
+The latest local unit suite includes 194 passing tests (2026-10-02). In earlier
+supervised live coding trials, DeepSeek looped until the repeated-tool
+guard paused it after 43 steps (~$0.0223 estimated), Gemini returned HTTP 429,
+and OpenRouter proposed code with a missing dependency and holdout leakage;
+the risky writes were denied. None produced a verified application. Kev-0.8B
+returned `continue` for a benign watchdog state and low-confidence `pause` for
+an injected instruction paired with repeated failures. These are narrow smoke
+checks, not evidence that the judge is robust to attacks. A final bounded
+DeepSeek task in a disposable workspace added `divide()` and two tests; Aetheris
+reported 3 passing tests in 5 steps, and an independent pytest rerun also
+passed 3 tests. This demonstrates one small task, not general coding reliability.
+The subsequent supervised DeepSeek pipeline trial generated a seeded sklearn
+classifier, local MLflow metrics, a Streamlit viewer, and linked wiki pages.
+An independent check passed 9 tests, including actual Streamlit AppTest rendering.
+The first draft incorrectly called feature translation pure covariate shift;
+the reviewer challenged that claim and the model corrected code, UI, docs, and
+wiki. Review hit the 40-step limit, resumed with 50, and finished at 45 steps
+(44 tool calls, one failed/skipped call, about $0.046 estimated for the saved
+review task). A transient provider TLS error also paused and resumed. These are
+specific observed cases, not a general reliability benchmark or full MLOps platform.
+These examples show why task completion and factual correctness are separate
+evaluation dimensions. Chat-completion and Responses requests default
+to a 4096-token output cap (`AETHERIS_MAX_COMPLETION_TOKENS`); this is not a
+total task or account spend limit.
+Each provider request also has a 120-second default wall-clock timeout
+(`AETHERIS_MODEL_TIMEOUT_SECONDS`); a timeout records a readable error and
+checkpoints the task for resume. `aetheris run` exits with code 2 when the task
+pauses, so automation can distinguish a pause from a final model response.
+The 24,000-character context budget measures the serialized messages array,
+including tool arguments and runtime state; it is not token-exact and excludes
+provider-specific tool schemas. Recent user turns are prioritized, and tool-call
+groups are retained with their results or omitted together.
 
 ## Main design trade-offs
 
@@ -193,11 +246,18 @@ test verifies same-session exclusion and lock release after process termination.
 ## Failure modes and honest answers
 
 - A model request error pauses the task and preserves the session for resume.
+- A provider request is bounded by a configurable wall-clock timeout; this does
+  not bound approved shell runtime, which has a separate tool timeout.
+- On POSIX, shell timeouts terminate the command process group and are covered
+  by a child-process regression test. Windows descendant cleanup is not yet
+  guaranteed.
 - A malformed or empty model response pauses with a checkpoint. The next run needs a
   valid provider response.
 - Unknown tools, invalid JSON arguments, and command failures become recorded
   tool failures. A denied approval pauses immediately; sibling tool calls from
   the same model response are recorded as not executed.
+- Tool calls must include unique provider IDs; malformed IDs pause before any
+  requested action is executed.
 - A max-step or known cost threshold pauses before more work. Unknown provider
   pricing cannot produce a hard cost guarantee.
 - Missing task state or corrupt SQLite JSON is an understandable startup error,
@@ -273,7 +333,11 @@ lets the model reassess. The side effect remains ambiguous.
 ### 4. How do you prevent infinite loops?
 
 Python enforces `max_steps`, checks cost when available, and pauses after three
-consecutive failures. Those limits do not depend on the model following its
+consecutive failures. It also pauses when the task repeats a successful
+tool+arguments signature, including after resume. Failed calls remain retryable;
+successful potentially mutating actions clear old signatures. This catches
+identical no-progress loops, not alternating semantically equivalent calls or
+every model planning failure. These controls do not depend on the model obeying
 instructions.
 
 ### 5. How do you bound context growth?
@@ -290,9 +354,9 @@ retry classes, and a tool-specific retry policy.
 
 ### 7. Does the cost budget guarantee no overspend?
 
-No. It stops before the next action only when the provider reports a usable
-estimate. One response can cross the threshold. A provider-side quota is needed
-for a hard cap.
+No. When a priced response crosses the threshold, its tool calls are blocked
+and the task pauses, but that response was already incurred. A provider-side
+quota is needed for a hard cap.
 
 ### 8. Is shell execution sandboxed?
 
@@ -488,6 +552,37 @@ into the same internal tool-call/result protocol. This path is tested with a
 fake Responses client but not with a live request on this machine because no
 OpenAI API key is configured. That distinction is important: adapter coverage
 is not model-quality evidence.
+
+## Small local models: measured boundary
+
+`AETHERIS_TOOL_PROFILE=local-coding` narrows the default tool set to directory,
+read/search, edit/write, and command tools. It also states the workspace root,
+requests relative paths, and discourages package installation unless asked.
+This reduces irrelevant schemas; it is neither a sandbox nor a reliability
+guarantee. On this Mac, Qwen 2.5 0.5B returned malformed tool-list text and the
+runtime marked the turn completed despite zero tool calls or artifacts. Qwen
+2.5 1.5B proposed an install against instructions, then repeated invalid
+edits. Qwen2.5-Coder 3B on an isolated copy read the requested files, reread one
+file, then returned an empty tool-call payload without adding the requested test
+or running the test command. Human approval stopped unsafe 1.5B actions; the
+3B run exposed a no-op completion. These results are why small local
+models should be treated as an experimental lane, with acceptance checks and
+human review—not an automatic fallback for important coding tasks.
+
+A fresh Qwen2.5-Coder 3B ML-pipeline task repeated pytest before creating test
+or source files, then paused after four tool failures across its initial run
+and resumes. The disposable workspace contains only a README stub. This does
+not support claiming that Aetheris can autonomously scaffold or validate an ML
+project with this local model.
+
+A separate CLI task asked the same 3B model to inspect the synthetic drift
+pipeline. It reread a successful file and emitted a function-call payload as
+plain text; before the repeated-call guard, Aetheris marked that run completed
+without an answer. With the guard, the same pattern paused after step 3. On
+resume, the persisted signature blocked another reread, but the model then
+invented an unavailable `output` tool and paused after three consecutive
+failures. This demonstrates improved loop containment, not a successful code
+review or a model-quality improvement.
 
 ## Failure cases to show
 

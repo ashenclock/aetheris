@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
 class WebSearchError(RuntimeError):
     """Raised when the configured search backend cannot return results."""
+
+
+DDGS_BACKENDS = (
+    "duckduckgo",
+    "google",
+    "grokipedia",
+    "mojeek",
+    "startpage",
+    "wikipedia",
+    "yahoo",
+)
+_DOMAIN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.I)
 
 
 def search_web(
@@ -29,12 +42,28 @@ def search_web(
         raise WebSearchError("max_results must be between 1 and 8")
     if domains and len(domains) > 5:
         raise WebSearchError("at most five domain filters are allowed")
+    if not re.fullmatch(r"[a-z]{2}-[a-z]{2}", region, re.I):
+        raise WebSearchError(
+            "region must use a two-letter country-language form, e.g. us-en"
+        )
+    if timelimit not in (None, "d", "w", "m", "y"):
+        raise WebSearchError("timelimit must be one of d, w, m, y, or unset")
+    domains = [_validate_domain(domain) for domain in domains or []]
 
     if backend == "auto":
-        backend = os.getenv("AETHERIS_SEARCH_BACKEND", "auto").strip() or "auto"
-    if os.getenv("BRAVE_SEARCH_API_KEY", "").strip():
+        backend = (
+            os.getenv("AETHERIS_SEARCH_BACKEND", "duckduckgo").strip() or "duckduckgo"
+        )
+    if backend == "auto":
+        backend = "duckduckgo"
+    brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+    if backend == "brave":
+        if not brave_key:
+            raise WebSearchError("Brave was selected but BRAVE_SEARCH_API_KEY is unset")
         results = _brave_search(query, max_results, region, timelimit)
     else:
+        if backend not in DDGS_BACKENDS:
+            raise WebSearchError("unsupported DDGS backend")
         results = _ddgs_search(query, max_results, region, timelimit, backend)
     return _filter_domains(results, domains or [])
 
@@ -44,7 +73,7 @@ def _brave_search(
 ) -> list[dict[str, str]]:
     params = {"q": query, "count": max_results, "safesearch": "moderate"}
     if timelimit:
-        params["freshness"] = timelimit
+        params["freshness"] = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}[timelimit]
     request = Request(
         "https://api.search.brave.com/res/v1/web/search?" + urlencode(params),
         headers={
@@ -59,8 +88,15 @@ def _brave_search(
             payload = json.loads(response.read(512_000))
     except Exception as exc:
         raise WebSearchError(f"Brave Search request failed: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise WebSearchError("Brave Search returned an unexpected response shape")
+    web_results = payload.get("web")
+    if not isinstance(web_results, dict) or not isinstance(
+        web_results.get("results", []), list
+    ):
+        raise WebSearchError("Brave Search returned an unexpected response shape")
     return _normalise_results(
-        payload.get("web", {}).get("results", []), url_key="url", text_key="description"
+        web_results.get("results", []), url_key="url", text_key="description"
     )
 
 
@@ -79,7 +115,7 @@ def _ddgs_search(
             "uv sync --extra search"
         ) from exc
     try:
-        records = DDGS().text(
+        records = DDGS(timeout=5).text(
             query,
             region=region,
             safesearch="moderate",
@@ -90,6 +126,19 @@ def _ddgs_search(
     except Exception as exc:
         raise WebSearchError(f"DDGS search failed: {exc}") from exc
     return _normalise_results(records, url_key="href", text_key="body")
+
+
+def _validate_domain(domain: str) -> str:
+    value = domain.strip().lower().removeprefix("www.").rstrip(".")
+    labels = value.split(".")
+    if (
+        not value
+        or len(value) > 253
+        or len(labels) < 2
+        or not all(_DOMAIN_LABEL.fullmatch(label) for label in labels)
+    ):
+        raise WebSearchError(f"invalid domain filter: {domain!r}")
+    return value
 
 
 def _normalise_results(

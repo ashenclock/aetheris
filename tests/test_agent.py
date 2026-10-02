@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -26,6 +27,45 @@ def temp_db(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_repeat_reuses_exact_file_result_and_preserves_sibling(temp_db, tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).write_text(f"content-{name}")
+
+    def call(identifier, filename):
+        return SimpleNamespace(
+            id=identifier,
+            function=SimpleNamespace(
+                name="read_file", arguments=json.dumps({"filepath": filename})
+            ),
+        )
+
+    model = AsyncMock(
+        side_effect=[
+            response(tool_calls=[call("a1", "a"), call("b1", "b")]),
+            response(tool_calls=[call("a2", "a"), call("c1", "c")]),
+            response(content="Complete"),
+        ]
+    )
+    agent = Agent("mock/offline", temp_db, workspace_root=tmp_path)
+    try:
+        await agent.init()
+        with patch("nexus.core.agent.acompletion", model):
+            assert await agent.chat("Inspect three files") == "Complete"
+        history = await agent.memory.get_history()
+        results = {
+            item["tool_call_id"]: item["content"]
+            for item in history
+            if item["role"] == "tool"
+        }
+        assert "content-a" in results["a2"]
+        assert "content-b" not in results["a2"]
+        assert results["c1"] == "content-c"
+        assert (await agent.memory.load_state()).status == TaskStatus.COMPLETED
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_agent_initialization_persists_system_prompt(temp_db):
     agent = Agent(model_name="ollama/llama3", db_path=temp_db)
     await agent.init()
@@ -33,6 +73,7 @@ async def test_agent_initialization_persists_system_prompt(temp_db):
     history = await agent.memory.get_history()
     assert len(history) == 1
     assert history[0]["role"] == "system"
+    assert "Never invent source line numbers" in history[0]["content"]
     await agent.close()
 
 
@@ -74,11 +115,31 @@ async def test_agent_rejects_concurrent_same_session_without_mutating_history(te
 
 
 @pytest.mark.asyncio
+async def test_repeated_failures_pause_before_another_model_request(temp_db):
+    agent = Agent(model_name="mock/offline", db_path=temp_db, session_id="failed")
+    await agent.init()
+    state = await agent._ensure_state("recover safely")
+    for _ in range(3):
+        state.record_step("tool", success=False, error="controlled failure")
+    await agent.memory.checkpoint(state, "Simulated repeated tool failures.")
+
+    with patch("nexus.core.agent.acompletion") as completion:
+        result = await agent.chat("resume after failures")
+
+    completion.assert_not_called()
+    resumed = await agent.memory.load_state()
+    assert resumed.status == TaskStatus.PAUSED
+    assert "Failure limit reached" in result
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_responses_adapter_normalizes_function_call(monkeypatch, tmp_path):
     class FakeResponses:
         async def create(self, **kwargs):
             assert kwargs["model"] == "codex-mini-latest"
             assert kwargs["tools"][0]["type"] == "function"
+            assert kwargs["max_output_tokens"] == 4096
             return SimpleNamespace(
                 output=[
                     SimpleNamespace(
@@ -119,6 +180,85 @@ async def test_responses_adapter_normalizes_function_call(monkeypatch, tmp_path)
     assert result.usage.prompt_tokens == 7
 
 
+@pytest.mark.asyncio
+async def test_chat_completion_uses_configured_completion_token_cap(tmp_path):
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=str(tmp_path / "token-cap.sqlite3"),
+        max_completion_tokens=768,
+    )
+    completion = AsyncMock(return_value=response("Done"))
+    with patch("nexus.core.agent.acompletion", completion):
+        result = await agent._request_model([{"role": "user", "content": "Hi"}])
+    assert result.choices[0].message.content == "Done"
+    assert completion.call_args.kwargs["max_tokens"] == 768
+
+
+def test_invalid_completion_token_cap_environment_is_actionable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AETHERIS_MAX_COMPLETION_TOKENS", "many")
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        Agent(model_name="mock/offline", db_path=str(tmp_path / "bad-env.sqlite3"))
+
+
+def test_completion_token_cap_rejects_nonpositive_values(tmp_path):
+    with pytest.raises(ValueError, match="must be positive"):
+        Agent(
+            model_name="mock/offline",
+            db_path=str(tmp_path / "invalid-token-cap.sqlite3"),
+            max_completion_tokens=0,
+        )
+
+
+@pytest.mark.parametrize("budget", [0, -1, 8_191, True])
+def test_context_budget_must_be_at_least_8192_characters(tmp_path, budget):
+    with pytest.raises(ValueError, match="context_char_budget must be at least 8192"):
+        Agent(
+            model_name="mock/offline",
+            db_path=str(tmp_path / "invalid-context.sqlite3"),
+            context_char_budget=budget,
+        )
+
+
+def test_invalid_context_budget_environment_is_actionable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AETHERIS_CONTEXT_CHARS", "large")
+    with pytest.raises(ValueError, match="AETHERIS_CONTEXT_CHARS must be"):
+        Agent(model_name="mock/offline", db_path=str(tmp_path / "bad-context.sqlite3"))
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_model_timeout_must_be_positive_and_finite(tmp_path, timeout):
+    with pytest.raises(ValueError, match="model_timeout_seconds must be positive"):
+        Agent(
+            model_name="mock/offline",
+            db_path=str(tmp_path / "invalid-timeout.sqlite3"),
+            model_timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_request_timeout_checkpoints_task_for_resume(temp_db):
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="provider-timeout",
+        model_timeout_seconds=0.01,
+    )
+    await agent.init()
+
+    async def never_returns(**_kwargs):
+        await asyncio.Event().wait()
+
+    with patch("nexus.core.agent.acompletion", side_effect=never_returns):
+        reply = await agent.chat("Wait for a model")
+
+    state = await agent.memory.load_state()
+    assert "paused after a model request error" in reply
+    assert state is not None and state.status == TaskStatus.PAUSED
+    assert state.last_action == "model_request"
+    assert "timed out" in state.last_error
+    await agent.close()
+
+
 def test_agent_can_expose_a_bounded_read_only_tool_set(tmp_path):
     agent = Agent(
         model_name="mock/offline",
@@ -129,6 +269,37 @@ def test_agent_can_expose_a_bounded_read_only_tool_set(tmp_path):
     assert all(
         skill.workspace_root == tmp_path.resolve() for skill in agent.skills.values()
     )
+
+
+def test_local_coding_profile_limits_tools_and_sets_small_model_guidance(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AETHERIS_TOOL_PROFILE", "local-coding")
+    agent = Agent(model_name="ollama/qwen2.5:1.5b", workspace_root=tmp_path)
+
+    assert set(agent.skills) == {
+        "inspect_workspace",
+        "list_directory",
+        "read_file",
+        "search_code",
+        "edit_file",
+        "write_file",
+        "run_command",
+    }
+    assert (
+        "Do not install packages unless the user explicitly asks" in agent.system_prompt
+    )
+    runtime = agent._runtime_context(
+        TaskState(session_id="local", goal="inspect", max_steps=4), "inspect"
+    )
+    assert f"workspace root: {tmp_path.resolve()}" in runtime
+    assert "use relative paths inside it" in runtime
+
+
+def test_agent_rejects_unknown_tool_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("AETHERIS_TOOL_PROFILE", "everything-plus-shell-root")
+    with pytest.raises(ValueError, match="AETHERIS_TOOL_PROFILE must be"):
+        Agent(model_name="mock/offline", workspace_root=tmp_path)
 
 
 def test_agent_profile_name_cannot_traverse_workspace(tmp_path):
@@ -174,7 +345,7 @@ def test_tool_call_serialization_normalizes_non_string_arguments():
     serialized = Agent._serialize_tool_calls(
         [
             SimpleNamespace(
-                id=None,
+                id="provider-call-1",
                 function=SimpleNamespace(
                     name="search_code", arguments={"pattern": "x"}
                 ),
@@ -182,8 +353,21 @@ def test_tool_call_serialization_normalizes_non_string_arguments():
         ]
     )
 
-    assert serialized[0]["id"]
+    assert serialized[0]["id"] == "provider-call-1"
     assert serialized[0]["function"]["arguments"] == '{"pattern": "x"}'
+
+
+@pytest.mark.parametrize("call_ids", [[None], [""], ["duplicate", "duplicate"]])
+def test_tool_call_serialization_rejects_missing_or_duplicate_ids(call_ids):
+    calls = [
+        SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(name="read_file", arguments="{}"),
+        )
+        for call_id in call_ids
+    ]
+    with pytest.raises(ValueError, match="call ID"):
+        Agent._serialize_tool_calls(calls)
 
 
 @pytest.mark.asyncio
@@ -246,6 +430,270 @@ async def test_tool_call_uses_assistant_and_matching_tool_messages(temp_db, tmp_
     assert history[3]["role"] == "tool"
     assert history[3]["tool_call_id"] == "read-1"
     assert "The answer is 42." in history[3]["content"]
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_successful_tool_call_is_not_reexecuted_and_can_resume(
+    temp_db, tmp_path
+):
+    target = tmp_path / "sample.txt"
+    target.write_text("stable observation", encoding="utf-8")
+    calls = [
+        SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="read_file",
+                arguments=f'{{"filepath":"{target}"}}',
+            ),
+        )
+        for call_id in ("read-once-1", "read-once-2")
+    ]
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="repeat-read",
+        enabled_skill_names={"read_file"},
+    )
+    await agent.init()
+    completion = AsyncMock(
+        side_effect=[response(tool_calls=[call]) for call in calls]
+        + [response(content="Read once")]
+    )
+
+    with patch("nexus.core.agent.acompletion", completion):
+        reply = await agent.chat("Read this file once and explain it")
+
+    state = await agent.memory.load_state()
+    history = await agent.memory.get_history()
+    assert reply == "Read once"
+    assert completion.await_count == 3
+    assert state is not None and state.status == TaskStatus.COMPLETED
+    assert state.tool_calls == 2 and state.tool_failures == 0
+    calls = [
+        item
+        for message in history
+        if message["role"] == "assistant"
+        for item in message.get("tool_calls", [])
+    ]
+    results = [message for message in history if message["role"] == "tool"]
+    assert len(calls) == len(results) == 2
+    assert [result["tool_call_id"] for result in results] == [
+        call["id"] for call in calls
+    ]
+    assert results[0]["content"].startswith("stable observation")
+    assert "not executed" in results[1]["content"]
+    await agent.close()
+
+    resumed = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="repeat-read",
+        enabled_skill_names={"read_file"},
+    )
+    await resumed.init()
+    retry = SimpleNamespace(
+        id="read-on-resume",
+        function=SimpleNamespace(
+            name="read_file",
+            arguments=f'{{"filepath":"{target}"}}',
+        ),
+    )
+    completion = AsyncMock(
+        side_effect=[response(tool_calls=[retry]), response(content="Done")]
+    )
+    with patch("nexus.core.agent.acompletion", completion):
+        resumed_reply = await resumed.chat("Continue")
+    resumed_state = await resumed.memory.load_state()
+    assert resumed_reply == "Done"
+    assert completion.await_count == 2
+    assert resumed_state is not None and resumed_state.status == TaskStatus.COMPLETED
+    assert resumed_state.tool_calls == 1
+    assert resumed_state.tool_failures == 0
+    await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_observation_is_returned_and_agent_can_answer(
+    temp_db, tmp_path
+):
+    target = tmp_path / "README.md"
+    target.write_text("A small example project.", encoding="utf-8")
+    calls = [
+        SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="read_file", arguments=json.dumps({"filepath": str(target)})
+            ),
+        )
+        for call_id in ("first-read", "duplicate-read")
+    ]
+    progress = []
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="duplicate-recovery",
+        workspace_root=tmp_path,
+        enabled_skill_names={"read_file"},
+        progress_callback=lambda event, details: progress.append((event, details)),
+    )
+    await agent.init()
+    completion = AsyncMock(
+        side_effect=[
+            response(tool_calls=[calls[0]]),
+            response(tool_calls=[calls[1]]),
+            response(content="This is a small example project."),
+        ]
+    )
+    with patch("nexus.core.agent.acompletion", completion):
+        reply = await agent.chat("Explain the README")
+
+    history = await agent.memory.get_history()
+    state = await agent.memory.load_state()
+    tool_results = [item for item in history if item["role"] == "tool"]
+    assert reply == "This is a small example project."
+    assert completion.await_count == 3
+    assert state is not None and state.status == TaskStatus.COMPLETED
+    assert state.tool_calls == 2 and state.tool_failures == 0
+    assert "Previous result" in tool_results[1]["content"]
+    assert "A small example project." in tool_results[1]["content"]
+    assert [item["tool_call_id"] for item in tool_results] == [
+        "first-read",
+        "duplicate-read",
+    ]
+    assert any(event == "tool_repeat" for event, _ in progress)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_alternating_read_loop_is_detected_across_tool_responses(
+    temp_db, tmp_path
+):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first observation", encoding="utf-8")
+    second.write_text("second observation", encoding="utf-8")
+    calls = [
+        SimpleNamespace(
+            id=f"read-{index}",
+            function=SimpleNamespace(
+                name="read_file", arguments=json.dumps({"filepath": str(path)})
+            ),
+        )
+        for index, path in enumerate((first, second, first), start=1)
+    ]
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="alternating-read-loop",
+        enabled_skill_names={"read_file"},
+    )
+    await agent.init()
+    completion = AsyncMock(
+        side_effect=[response(tool_calls=[call]) for call in calls]
+        + [response(content="Both files inspected")]
+    )
+
+    with patch("nexus.core.agent.acompletion", completion):
+        reply = await agent.chat("Inspect these two files")
+
+    state = await agent.memory.load_state()
+    history = await agent.memory.get_history()
+    observations = [
+        message["content"] for message in history if message["role"] == "tool"
+    ]
+    assert reply == "Both files inspected"
+    assert completion.await_count == 4
+    assert state is not None and state.status == TaskStatus.COMPLETED
+    assert state.tool_calls == 3 and state.tool_failures == 0
+    assert "first observation" in observations[0]
+    assert "second observation" in observations[1]
+    assert "Previous result" in observations[2]
+    assert len(state.recent_tool_signatures) == 2
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_identical_tool_call_can_retry_after_transient_failure(temp_db):
+    call = SimpleNamespace(
+        id="retry-read",
+        function=SimpleNamespace(name="read_file", arguments='{"filepath":"x"}'),
+    )
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="retry-same-call",
+        enabled_skill_names={"read_file"},
+    )
+    await agent.init()
+    skill = agent.skills["read_file"]
+    skill.execute = AsyncMock(side_effect=["Error: transient failure", "Recovered"])
+    completion = AsyncMock(
+        side_effect=[
+            response(tool_calls=[call]),
+            response(tool_calls=[call]),
+            response("Done"),
+        ]
+    )
+
+    with patch("nexus.core.agent.acompletion", completion):
+        reply = await agent.chat("Read x, retrying a temporary tool error")
+
+    state = await agent.memory.load_state()
+    assert reply == "Done"
+    assert completion.await_count == 3
+    assert skill.execute.await_count == 2
+    assert state is not None and state.status == TaskStatus.COMPLETED
+    assert state.tool_failures == 1
+    assert len(state.recent_tool_signatures) == 1
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_budget_overshoot_pauses_before_executing_tool(temp_db, tmp_path):
+    call = SimpleNamespace(
+        id="budget-write",
+        function=SimpleNamespace(
+            name="write_file",
+            arguments='{"filepath":"blocked.txt","content":"no"}',
+        ),
+    )
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        session_id="cost-overshoot",
+        cost_budget_usd=0.01,
+        workspace_root=tmp_path,
+        enabled_skill_names={"write_file"},
+    )
+    await agent.init()
+    priced_usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "estimated_cost_usd": 0.02,
+        "cost_estimate_available": True,
+    }
+
+    with (
+        patch(
+            "nexus.core.agent.acompletion",
+            new_callable=AsyncMock,
+            return_value=response(tool_calls=[call]),
+        ),
+        patch("nexus.core.tracker.CostTracker.add_usage", return_value=priced_usage),
+    ):
+        reply = await agent.chat("Do not exceed budget")
+
+    state = await agent.memory.load_state()
+    history = await agent.memory.get_history()
+    assert "cost budget" in reply.lower()
+    assert state is not None and state.status == TaskStatus.PAUSED
+    assert state.estimated_cost_usd == 0.02
+    assert not (tmp_path / "blocked.txt").exists()
+    assert history[2]["tool_calls"][0]["id"] == "budget-write"
+    assert history[3]["role"] == "tool"
+    assert history[3]["tool_call_id"] == "budget-write"
+    assert "not executed" in history[3]["content"]
     await agent.close()
 
 
@@ -384,6 +832,37 @@ async def test_builtin_tool_arguments_are_validated_before_execution(temp_db, tm
     assert "invalid arguments" in result["content"]
     assert execute.await_count == 0
     assert state.tool_failures == 1
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_rejects_unavailable_write_tool_at_runtime(temp_db, tmp_path):
+    agent = Agent(
+        model_name="mock/offline",
+        db_path=temp_db,
+        workspace_root=tmp_path,
+        mode="plan",
+    )
+    await agent.init()
+    target = tmp_path / "should-not-exist.txt"
+    state = await agent._ensure_state("inspect only")
+
+    await agent._execute_tool_call(
+        {
+            "id": "plan-write-attempt",
+            "function": {
+                "name": "write_file",
+                "arguments": '{"filepath":"should-not-exist.txt","content":"no"}',
+            },
+        },
+        state,
+    )
+
+    result = (await agent.memory.get_history())[-1]
+    assert "unknown tool" in result["content"]
+    assert result["tool_call_id"] == "plan-write-attempt"
+    assert state.tool_failures == 1
+    assert not target.exists()
     await agent.close()
 
 
@@ -594,6 +1073,54 @@ async def test_malformed_model_response_pauses_with_recoverable_state(temp_db):
 
 
 @pytest.mark.asyncio
+async def test_textual_function_call_payload_does_not_claim_completion(temp_db):
+    agent = Agent(
+        model_name="mock/offline", db_path=temp_db, session_id="textual-tool-call"
+    )
+    await agent.init()
+    malformed_tool_text = json.dumps(
+        {
+            "call_123": {
+                "id": "call_123",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": {"filepath": "README.md"},
+                },
+            }
+        }
+    )
+    with patch(
+        "nexus.core.agent.acompletion",
+        new_callable=AsyncMock,
+        return_value=response(malformed_tool_text),
+    ):
+        reply = await agent.chat("Read the file")
+
+    state = await agent.memory.load_state()
+    history = await agent.memory.get_history()
+    assert "function-call payload as plain text" in reply
+    assert state is not None and state.status == TaskStatus.PAUSED
+    assert state.last_action == "model_response"
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == malformed_tool_text
+    assert not [message for message in history if message["role"] == "tool"]
+    await agent.close()
+
+
+def test_json_report_is_not_mistaken_for_a_textual_tool_call():
+    assert not Agent._looks_like_unparsed_tool_call('{"accuracy": 0.9}')
+    assert Agent._looks_like_unparsed_tool_call(
+        '{"call_1":{"type":"function","function":{"name":"read_file",'
+        '"arguments":{"filepath":"x"}}}}'
+    )
+    assert Agent._looks_like_unparsed_tool_call(
+        '{"tool_calls":[{"id":"call_2","type":"function",'
+        '"function":{"name":"read_file","arguments":"{}"}}]}'
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_model_response_pauses_instead_of_claiming_completion(temp_db):
     agent = Agent(
         model_name="mock/offline", db_path=temp_db, session_id="empty-response"
@@ -659,6 +1186,31 @@ def test_bounded_history_keeps_complete_tool_protocol():
     assert bounded[0]["role"] == "system"
 
 
+@pytest.mark.parametrize(
+    "max_messages,expected_roles", [(1, ["user"]), (2, ["assistant", "tool"])]
+)
+def test_bounded_history_never_cuts_through_a_tool_pair(max_messages, expected_roles):
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "read file"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "pair-1",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "file text", "tool_call_id": "pair-1"},
+    ]
+
+    bounded = Agent._bounded_history(history, max_messages=max_messages)
+
+    assert [message["role"] for message in bounded[1:]] == expected_roles
+
+
 def test_bounded_history_caps_text_size():
     history = [
         {"role": "system", "content": "s" * 10_000},
@@ -667,6 +1219,88 @@ def test_bounded_history_caps_text_size():
     ]
     bounded = Agent._bounded_history(history, max_messages=10, max_chars=1_000)
     assert sum(len(message.get("content") or "") for message in bounded) <= 1_000
+
+
+def test_bounded_history_counts_tool_arguments_and_preserves_call_pairs():
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "old request"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "large-call",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"content":"' + "x" * 5_000 + '"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "written", "tool_call_id": "large-call"},
+        {"role": "user", "content": "current request"},
+    ]
+
+    bounded = Agent._bounded_history(
+        history, max_messages=10, max_chars=500, system_suffix="runtime facts"
+    )
+    encoded_size = sum(
+        len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+        for message in bounded
+    )
+    call_ids = {
+        call["id"] for message in bounded for call in message.get("tool_calls", [])
+    }
+    result_ids = {
+        message["tool_call_id"] for message in bounded if message.get("role") == "tool"
+    }
+
+    assert encoded_size <= 500
+    assert "runtime facts" in bounded[0]["content"]
+    assert call_ids == result_ids == set()
+    assert bounded[-1]["content"] == "current request"
+
+
+@pytest.mark.parametrize("history", [[], [{"role": "system", "content": "x" * 20_000}]])
+def test_bounded_history_caps_system_only_and_retains_runtime_suffix(history):
+    bounded = Agent._bounded_history(
+        history, max_messages=2, max_chars=1_024, system_suffix="runtime facts"
+    )
+
+    assert len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))) <= 1_024
+    assert "runtime facts" in bounded[0]["content"]
+
+
+def test_bounded_history_rejects_runtime_suffix_that_cannot_fit():
+    with pytest.raises(ValueError, match="Runtime context exceeds"):
+        Agent._bounded_history(
+            [], max_messages=2, max_chars=1_024, system_suffix="r" * 2_000
+        )
+
+
+def test_bounded_history_prunes_multi_call_protocol_as_complete_groups():
+    calls = [
+        {"id": f"call-{index}", "function": {"name": "read_file", "arguments": "{}"}}
+        for index in range(2)
+    ]
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "read two files"},
+        {"role": "assistant", "content": None, "tool_calls": calls},
+        {"role": "tool", "content": "x" * 5_000, "tool_call_id": "call-0"},
+        {"role": "tool", "content": "second", "tool_call_id": "call-1"},
+    ]
+
+    bounded = Agent._bounded_history(history, max_messages=5, max_chars=1_024)
+    call_ids = {
+        call["id"] for message in bounded for call in message.get("tool_calls", [])
+    }
+    result_ids = {
+        message["tool_call_id"] for message in bounded if message.get("role") == "tool"
+    }
+    assert call_ids == result_ids
+    assert bounded[-1]["content"] == "read two files"
 
 
 @pytest.mark.asyncio

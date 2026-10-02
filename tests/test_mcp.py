@@ -41,7 +41,8 @@ async def test_local_mcp_server_lists_and_calls_a_tool(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agent_loads_mcp_tools_only_for_full_runtime(tmp_path):
+async def test_agent_loads_mcp_tools_only_for_full_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("AETHERIS_ENABLE_MCP", "1")
     add_mcp_server(tmp_path, "demo", f"{sys.executable} {FIXTURE}")
     agent = Agent(model_name="mock/offline", workspace_root=tmp_path)
     await agent.init()
@@ -56,7 +57,8 @@ async def test_agent_loads_mcp_tools_only_for_full_runtime(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_tool_is_approval_gated(tmp_path):
+async def test_mcp_tool_is_approval_gated(tmp_path, monkeypatch):
+    monkeypatch.setenv("AETHERIS_ENABLE_MCP", "1")
     add_mcp_server(tmp_path, "demo", f"{sys.executable} {FIXTURE}")
     agent = Agent(model_name="mock/offline", workspace_root=tmp_path)
     await agent.init()
@@ -79,6 +81,25 @@ async def test_mcp_tool_is_approval_gated(tmp_path):
         "not been approved" in history[-1]["content"]
         or "not approved" in history[-1]["content"]
     )
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_start_workspace_mcp_without_opt_in(tmp_path, monkeypatch):
+    marker = tmp_path / "mcp-started"
+    script = tmp_path / "mcp_marker.py"
+    script.write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('started')\n",
+        encoding="utf-8",
+    )
+    add_mcp_server(tmp_path, "marker", f"{sys.executable} {script}")
+    monkeypatch.delenv("AETHERIS_ENABLE_MCP", raising=False)
+
+    agent = Agent(model_name="mock/offline", workspace_root=tmp_path)
+    await agent.init()
+
+    assert "mcp__marker__" not in " ".join(agent.skills)
+    assert not marker.exists()
     await agent.close()
 
 

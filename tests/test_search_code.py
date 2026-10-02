@@ -52,3 +52,5 @@ async def test_search_limits_results_and_rejects_unbounded_arguments(tmp_path):
         SearchCodeSkill(tmp_path).parameters_schema.model_validate(
             {"pattern": "needle", "max_results": 201}
         )
+    direct = await SearchCodeSkill(tmp_path).execute(pattern="needle", max_results=201)
+    assert direct.startswith("Error: invalid search arguments:")

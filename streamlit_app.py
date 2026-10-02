@@ -11,15 +11,21 @@ from typing import Any
 import streamlit as st
 
 from evals.run import run_suite
-from nexus.core.agent import Agent
 from nexus.core.knowledge import KnowledgeStore
 from nexus.transcription import TranscriptionError, transcribe_file
 from nexus.web.github import GitHubRepositoryError, download_public_repository
 from nexus.skills.web_search import WebSearchSkill
+from nexus.chat import ChatControls, COMMANDS
+from nexus.core.events import format_event, redact
+from nexus.web.session import run_turn
+from dotenv import load_dotenv
+from nexus.providers import PROVIDERS
 
 
-READ_ONLY_TOOLS = {"list_directory", "read_file", "search_code", "recall"}
 logger = logging.getLogger(__name__)
+LOCAL_MODE = os.getenv("AETHERIS_WEB_LOCAL") == "1"
+if LOCAL_MODE:
+    load_dotenv()
 
 
 def _secret_or_env(name: str) -> str | None:
@@ -34,6 +40,13 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+for provider in PROVIDERS:
+    for key in provider.env_vars:
+        value = _secret_or_env(key)
+        if value:
+            os.environ.setdefault(key, value)
+
+
 async def _search_web(query: str, domains: list[str]) -> str:
     """Run the bounded search skill behind an explicit UI button."""
     return await WebSearchSkill().execute(
@@ -43,43 +56,16 @@ async def _search_web(query: str, domains: list[str]) -> str:
     )
 
 
-async def _ask_agent(
-    *,
-    model: str,
-    workspace: Path,
-    database: Path,
-    prompt: str,
-    max_steps: int,
-) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
-    agent = Agent(
-        model_name=model,
-        db_path=str(database),
-        session_id="streamlit-demo",
-        max_steps=max_steps,
-        cost_budget_usd=0.25,
-        workspace_root=workspace,
-        enabled_skill_names=READ_ONLY_TOOLS,
-    )
-    try:
-        await agent.init()
-        answer = await agent.chat(prompt)
-        state = await agent.memory.load_state()
-        history = await agent.memory.get_history()
-        return answer, state.model_dump() if state else None, history
-    finally:
-        await agent.close()
-
-
 def _show_state(state: dict[str, Any] | None) -> None:
     if not state:
         return
     columns = st.columns(4)
-    columns[0].metric("Status", state["status"])
+    columns[0].metric("Status", state.get("status_label", state["status"]))
     columns[1].metric("Steps", f"{state['step_count']}/{state['max_steps']}")
     columns[2].metric("Tool calls", state["tool_calls"])
     columns[3].metric("Checkpoints", state["checkpoint_count"])
     with st.expander("Authoritative runtime state"):
-        st.json(state)
+        st.json(redact(state))
 
 
 def _show_history(history: list[dict[str, Any]]) -> None:
@@ -91,12 +77,14 @@ def _show_history(history: list[dict[str, Any]]) -> None:
             else:
                 label = role
             st.code(
-                f"{label}\n{message.get('content') or message.get('tool_calls') or ''}"
+                redact(
+                    f"{label}\n{message.get('content') or message.get('tool_calls') or ''}"
+                )
             )
 
 
 def _show_knowledge(root: Path) -> None:
-    store = KnowledgeStore(root / ".aetheris/wiki")
+    store = KnowledgeStore(root / ".aetheris/wiki", root)
     pages = store.pages()
     with st.expander("Knowledge base / wiki", expanded=bool(pages)):
         st.caption(
@@ -110,13 +98,13 @@ def _show_knowledge(root: Path) -> None:
         st.graphviz_chart(store.graph_dot(), use_container_width=True)
         for page in pages:
             with st.expander(page.stem.replace("-", " ").title()):
-                st.markdown(page.read_text(encoding="utf-8"))
+                st.markdown(redact(page.read_text(encoding="utf-8")))
 
 
 st.set_page_config(page_title="Aetheris", page_icon="◈", layout="wide")
 st.title("Aetheris")
 st.caption(
-    "A small, resumable coding-agent runtime — deployed as a read-only GitHub exploration demo."
+    "One runtime, terminal and web chat. Local coding is opt-in; GitHub snapshots are read-only."
 )
 
 if "repo_root" not in st.session_state:
@@ -125,14 +113,29 @@ if "repo_name" not in st.session_state:
     st.session_state.repo_name = None
 if "repo_temp" not in st.session_state:
     st.session_state.repo_temp = None
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "controls" not in st.session_state:
+    st.session_state.controls = None
 
 with st.sidebar:
     st.header("Demo controls")
     model = os.getenv("AETHERIS_MODEL", "openai/gpt-4o-mini")
     st.caption(f"Configured model: `{model}`")
-    max_steps = st.slider("Maximum steps", min_value=1, max_value=12, value=6)
+    max_steps = st.slider("Maximum steps", min_value=1, max_value=100, value=40)
+    if LOCAL_MODE:
+        allowed = Path(os.getenv("AETHERIS_WEB_WORKSPACE", ".")).resolve()
+        folder = st.text_input("Local workspace", value=str(allowed))
+        if st.button("Open local workspace"):
+            root = Path(folder).resolve()
+            if not root.is_dir() or not root.is_relative_to(allowed):
+                st.error(
+                    "Choose an existing directory inside the configured workspace root."
+                )
+            else:
+                st.session_state.repo_root = str(root)
+                st.session_state.repo_name = str(root)
+                st.session_state.controls = ChatControls(
+                    root, str(root / "aetheris_memory.db"), model
+                )
     st.caption(
         "The hosted demo exposes only read-only tools. Shell, write, edit, and push operations are intentionally unavailable."
     )
@@ -156,7 +159,9 @@ with st.sidebar:
             st.session_state.repo_name = (
                 f"{repository.owner}/{repository.name}:{branch or 'default'}"
             )
-            st.session_state.messages = []
+            st.session_state.controls = ChatControls(
+                root, str(root / ".aetheris/streamlit.sqlite3"), model, read_only=True
+            )
             st.success(f"Loaded {st.session_state.repo_name}")
         except GitHubRepositoryError as exc:
             st.error(str(exc))
@@ -231,43 +236,132 @@ if st.session_state.get("offline_summary"):
 
 if st.session_state.repo_root:
     root = Path(st.session_state.repo_root)
-    database = root / ".aetheris" / "streamlit.sqlite3"
+    controls = st.session_state.controls
+    database = Path(controls.database)
     database.parent.mkdir(parents=True, exist_ok=True)
+    controls.max_steps = max_steps
+    _run(controls.memory.init_db())
     st.subheader(f"Repository: {st.session_state.repo_name}")
     st.info(
-        "This is a bounded read-only analysis. The repository is held in an isolated temporary workspace and is removed when the session is replaced."
+        "Read-only GitHub archive snapshot (not a git clone/pull)."
+        if controls.read_only
+        else "Local coding mode: approvals are not a sandbox. Use /permissions to inspect access."
     )
+    st.caption(f"Session: {controls.session} · Model: {controls.model}")
+    if st.session_state.get("notice"):
+        st.info(st.session_state.pop("notice"))
+    with st.expander("/ Commands"):
+        st.text(
+            "\n".join(
+                f"{name} — {description}" for name, description in COMMANDS.items()
+            )
+        )
     _show_knowledge(root)
-    for message in st.session_state.messages:
+    with st.expander("State / database / checkpoint timeline"):
+        state = _run(controls.memory.load_state())
+        _show_state(state.public_payload() if state else None)
+        trace = _run(controls.memory.inspect_trace())
+        st.json(redact(trace))
+        checkpoints = trace.get("checkpoints", [])
+        if checkpoints:
+            st.line_chart(checkpoints, x="timestamp", y="steps")
+    # SQLite is the shared record: reopening the UI also sees CLI messages.
+    history = _run(controls.memory.get_history())
+    messages = [
+        {"role": item["role"], "content": item["content"]}
+        for item in history
+        if item["role"] in {"user", "assistant"}
+        and item.get("content")
+        and not item.get("tool_calls")
+    ]
+    for message in messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(redact(message["content"]))
+    last_turn = st.session_state.get("last_turn")
+    if last_turn and last_turn["session"] == controls.session:
+        with st.expander(
+            "Last turn activity",
+            expanded=bool(state and state.pending_approval),
+        ):
+            st.code("\n".join(last_turn["events"]))
+        if not any(item["content"] == last_turn["reply"] for item in messages):
+            st.info(redact(last_turn["reply"]))
 
-    prompt = st.chat_input("Ask Aetheris to inspect the repository...")
+    prompt = st.chat_input("Message or /command — /help /wiki /trace /resume")
+    approval_id, approval = None, None
+    saved = _run(controls.memory.load_state())
+    if saved and saved.pending_approval:
+        pending = saved.pending_approval
+        st.warning(
+            f"Approval required: {pending['function']['name']}. Nothing executed yet."
+        )
+        st.code(redact(pending["function"]["arguments"]))
+        approve, reject = st.columns(2)
+        if approve.button("Approve once"):
+            approval_id, approval, prompt = (
+                pending["id"],
+                True,
+                "Continue after explicit approval.",
+            )
+        if reject.button("Reject"):
+            approval_id, approval, prompt = (
+                pending["id"],
+                False,
+                "Reject the pending action.",
+            )
+    if prompt and prompt.startswith("/"):
+        previous_selection = (controls.session, controls.model)
+        result = _run(controls.command(prompt))
+        st.info(result.text)
+        if result.data is not None:
+            if result.view == "wiki":
+                st.graphviz_chart(result.data["graph"])
+                for page in result.data["pages"]:
+                    st.markdown(redact(page["content"]))
+            elif result.view in {"sessions", "providers"}:
+                st.dataframe(result.data)
+            else:
+                st.json(redact(result.data))
+        if result.exit:
+            st.session_state.repo_root = None
+            st.session_state.controls = None
+            st.rerun()
+        if (
+            previous_selection != (controls.session, controls.model)
+            and not result.prompt
+        ):
+            st.session_state.notice = result.text
+            st.rerun()
+        prompt = result.prompt
     if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        api_key = _secret_or_env("OPENAI_API_KEY")
-        if api_key:
-            os.environ.setdefault("OPENAI_API_KEY", api_key)
         with st.chat_message("assistant"):
-            with st.spinner("Aetheris is inspecting the repository..."):
+            with st.status("Aetheris activity", expanded=True) as activity:
                 try:
+                    events = []
+
+                    def progress(event, details):
+                        text = format_event(event, details)
+                        events.append(text)
+                        st.code(text)
+
                     answer, state, history = _run(
-                        _ask_agent(
-                            model=model,
-                            workspace=root,
-                            database=database,
-                            prompt=prompt,
-                            max_steps=max_steps,
-                        )
+                        run_turn(controls, prompt, progress, approval_id, approval)
                     )
-                    st.markdown(answer)
+                    activity.update(
+                        label="Turn finished — inspect state for completion or pause",
+                        state="complete",
+                    )
+                    st.markdown(redact(answer))
                     _show_state(state)
                     _show_history(history)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
-                    )
+                    st.session_state.last_turn = {
+                        "session": controls.session,
+                        "events": events[-100:],
+                        "reply": answer,
+                    }
+                    st.rerun()
                 except Exception:
                     request_id = secrets.token_hex(6)
                     logger.exception("Streamlit agent request %s failed", request_id)

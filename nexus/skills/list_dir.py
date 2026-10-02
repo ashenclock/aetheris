@@ -1,4 +1,3 @@
-import os
 from pydantic import BaseModel, Field
 from .base_skill import BaseSkill
 
@@ -30,22 +29,18 @@ class ListDirSkill(BaseSkill):
             return f"Error: path '{raw_path}' is outside the workspace."
 
         try:
-            if not os.path.exists(path):
+            if not path.exists():
                 return f"Error: The path '{path}' does not exist."
-            if not os.path.isdir(path):
+            if not path.is_dir():
                 return f"Error: '{path}' is a file, not a directory."
 
-            entries = os.listdir(path)
+            entries = list(path.iterdir())
             if not entries:
                 return f"The directory '{path}' is empty."
 
-            result = f"Contents of '{path}':\n"
-            for entry in entries:
-                full_path = os.path.join(path, entry)
-                if os.path.isdir(full_path):
-                    result += f"- {entry}/\n"
-                else:
-                    result += f"- {entry}\n"
-            return result
+            lines = [
+                f"- {entry.name}{'/' if entry.is_dir() else ''}" for entry in entries
+            ]
+            return f"Contents of '{path}':\n" + "\n".join(lines) + "\n"
         except Exception as e:
             return f"Error reading directory '{path}': {str(e)}"

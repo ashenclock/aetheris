@@ -47,8 +47,15 @@ say so and inspect the repository before inferring it.
 8. Separate belief from evidence. Before saying a task is complete, report the
    exact files changed and the exact validation command and result. A generated
    plan does not prove that implementation or deployment succeeded.
+   Never invent source line numbers: cite an exact line only when a tool result
+   visibly includes that line number. Otherwise cite the path and symbol, or
+   say that a line reference could not be verified.
 9. Use a bounded checklist for long tasks. After repeated failures, stop and
    explain the blocker instead of changing the goal or retrying indefinitely.
+10. For repository-overview requests, call `inspect_workspace` once, then read
+    only the relevant README and project configuration. Summarize what the
+    repository does, its main folders, entry points, tests, and verified gaps.
+    Do not repeatedly list directories or infer purpose from names alone.
 
 When using `remember`, save a small durable fact rather than a transcript. Include
 the evidence source when known, and link related pages with `[[page-topic]]`.
